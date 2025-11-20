@@ -18,7 +18,19 @@ import logging
 import random
 from train import train, evaluate
 import torch.optim as optim
-
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from sklearn.metrics import (confusion_matrix, classification_report,
+                             precision_recall_fscore_support, accuracy_score,
+                             cohen_kappa_score)
+from sklearn.preprocessing import label_binarize
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import torch
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +38,26 @@ logging.basicConfig(
     filename='main.log',
     filemode='a'
 )
+def safe_to_numpy_labels(labels):
+    """
+    Convert labels returned from evaluate() to 1D numpy integer labels.
+    Accepts: list of ints, list of tensors, numpy arrays, one-hot arrays, torch.Tensor.
+    Returns: 1D numpy array of dtype int.
+    """
+    # if torch tensor
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+    # if list of tensors
+    if isinstance(labels, list) and len(labels) > 0 and isinstance(labels[0], torch.Tensor):
+        labels = [int(x.item()) if x.numel() == 1 else x.detach().cpu().numpy() for x in labels]
+        labels = np.array(labels)
+    labels = np.array(labels)
+    # If one-hot or probabilities (n_samples, n_classes) -> argmax
+    if labels.ndim == 2:
+        labels = np.argmax(labels, axis=1)
+    # Flatten any shape like (N,1)
+    labels = labels.reshape(-1).astype(int)
+    return labels
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -116,7 +148,7 @@ mymodels = {
     #     'optimizer': ['Adam'],
     #     'learning_rate': [0.001],
     #     'weight_decay': [0.0001],
-    #     'fuse': ['concat', 'rgb', 'hsi'],  # 支持四种模式
+    #     'fuse': ['concat'],  # 支持四种模式
     #     'dropout': [0.5],
     #     'heads': [4],          # 统一保留
     #     'dim_head': [16],      # 即使没用也保留
@@ -128,11 +160,15 @@ mymodels = {
     #     'act': ['gelu'],       # 激活函数（统一保留）
     #     'epochs': [50],
     #     'backbone': ['resnet34'], # backbone 选择
-    #     'use_vit': [False],       # 是否启用 ViT encoder
+    #     'use_vit': [True, False],       # 是否启用 ViT encoder
     #     'c': [313],               # HSI 通道数
     #     # 'num_classes': [4],       # 分类数
     # }),
 }
+
+all_folds_true_labels = []
+all_folds_pred_labels = []
+all_fold_results = []
 
 test_dataset = MultiModalDataset(rgb_test, X_test, y_test,transform_rgb=transform_rgb,transform_hsi=transform_hsi)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -146,7 +182,9 @@ all_fold_results = []
 for model_name, (model_class, grid) in mymodels.items():
     for params in ParameterGrid(grid):
         fold_metrics = []
-
+        current_params_true_labels = []
+        current_params_pred_labels = []
+        
         for fold, (train_idx, val_idx) in enumerate(skf.split(X_trainval, y_trainval), 1):
             start = time.time()
             X_train = X_trainval[train_idx]
@@ -217,8 +255,11 @@ for model_name, (model_class, grid) in mymodels.items():
 
             # test_metrics = evaluate(best_model, test_loader, device=device)
             class_names = ['Healthy', '2dpi', '4dpi', '6dpi'] 
-            test_metrics = evaluate(best_model, test_loader, class_names=class_names, device=device)
+            # test_metrics = evaluate(best_model, test_loader, class_names=class_names, device=device)
+            test_metrics, true_labels, pred_labels = evaluate(best_model, test_loader, class_names=class_names, device=device)
             fold_metrics.append(test_metrics)
+            current_params_true_labels.extend(true_labels)
+            current_params_pred_labels.extend(pred_labels)
 
             logging.info(f"Fold {fold} Test Accuracy: {test_metrics['test_accuracy']:.4f}")
 
@@ -226,85 +267,143 @@ for model_name, (model_class, grid) in mymodels.items():
             torch.cuda.empty_cache()
             gc.collect()
             
-            # print(f"训练之外的时间：{end-start:.4f}")
+            
             print("clean")
+            
         mean_metrics = {}
-    
-    # 提取所有折的同一个指标，然后计算均值和标准差
-    for key in fold_metrics[0].keys():
-        # 我们只对数值类型的指标进行计算
-        if isinstance(fold_metrics[0][key], (int, float)):
-            all_values = [m[key] for m in fold_metrics]
-            mean_metrics[f'mean_{key}'] = np.mean(all_values)
-            mean_metrics[f'std_{key}'] = np.std(all_values)
+        overall_cm = confusion_matrix(current_params_true_labels, current_params_pred_labels)
+        
+        # --- Replace original confusion matrix block with this ---
+        # Ensure labels are numpy ints
+        y_true = safe_to_numpy_labels(current_params_true_labels)
+        y_pred = safe_to_numpy_labels(current_params_pred_labels)
 
-    # 将这组参数的最终结果（包含每一折的详情和平均值）保存起来
-    current_model_result = {
-        'model': model_name,
-        'params': params,
-        'fold_metrics': fold_metrics,
-        'mean_metrics': mean_metrics  # 保存所有指标的均值和标准差
-    }
+        # Validate class_names length vs max label
+        n_classes = max(y_true.max(), y_pred.max()) + 1
+        if len(class_names) != n_classes:
+            # try to handle mismatch: warn and create generic class names if necessary
+            logging.warning(f"class_names length ({len(class_names)}) != n_classes ({n_classes}). Adjusting class_names.")
+            class_names_fixed = [str(i) for i in range(n_classes)]
+        else:
+            class_names_fixed = class_names
+
+        # compute confusion matrix with explicit labels order to avoid reordering
+        labels_order = list(range(n_classes))
+        overall_cm = confusion_matrix(y_true, y_pred, labels=labels_order)
+
+        # Metrics summary
+        acc = accuracy_score(y_true, y_pred)
+        prec_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0)
+        prec_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(y_true, y_pred, average='micro', zero_division=0)
+        per_class_p, per_class_r, per_class_f1, support = precision_recall_fscore_support(y_true, y_pred, average=None, labels=labels_order, zero_division=0)
+        kappa = cohen_kappa_score(y_true, y_pred)
+
+        print(f"Overall Accuracy: {acc:.4f}, Macro F1: {f1_macro:.4f}, Micro F1: {f1_micro:.4f}, Kappa: {kappa:.4f}")
+
+        # Detailed classification report
+        report = classification_report(y_true, y_pred, labels=labels_order, target_names=class_names_fixed, zero_division=0)
+        print("Classification Report:\n", report)
+
+        # Save confusion matrix plot (both counts and normalized)
+        cm_df = pd.DataFrame(overall_cm, index=class_names_fixed, columns=class_names_fixed)
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm_df, annot=True, fmt='d', cmap='Blues')
+        plt.title(f'Overall 5-Fold Confusion Matrix for {model_name} (counts)')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.tight_layout()
+        plt.savefig(f'overall_5fold_cm_{model_name}_counts.png', dpi=200)
+        plt.close()
+
+        # normalized
+        row_sums = overall_cm.sum(axis=1, keepdims=True)
+        norm_cm = overall_cm.astype('float') / np.maximum(row_sums, 1)  # avoid div0
+        norm_df = pd.DataFrame(norm_cm, index=class_names_fixed, columns=class_names_fixed)
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(norm_df, annot=True, fmt='.2f', cmap='Blues')
+        plt.title(f'Overall 5-Fold Confusion Matrix for {model_name} (row-normalized)')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.tight_layout()
+        plt.savefig(f'overall_5fold_cm_{model_name}_norm.png', dpi=200)
+        plt.close()
+
+        # Append to global lists as before
+        all_folds_true_labels.extend(y_true.tolist())
+        all_folds_pred_labels.extend(y_pred.tolist())
+        # 提取所有折的同一个指标，然后计算均值和标准差
+        for key in fold_metrics[0].keys():
+            # 我们只对数值类型的指标进行计算
+            if isinstance(fold_metrics[0][key], (int, float)):
+                all_values = [m[key] for m in fold_metrics]
+                mean_metrics[f'mean_{key}'] = np.mean(all_values)
+                mean_metrics[f'std_{key}'] = np.std(all_values)
+
+        # 将这组参数的最终结果（包含每一折的详情和平均值）保存起来
+        current_model_result = {
+            'model': model_name,
+            'params': params,
+            'fold_metrics': fold_metrics,
+            'mean_metrics': mean_metrics  # 保存所有指标的均值和标准差
+        }
     # all_fold_results.append(current_model_result) # 假设 all_fold_results 在外部定义
 
     # --- 将当前模型的结果以追加模式写入文本文件 ---
     # 这是你要求的核心部分
-    output_filepath = "store/5fold_results.txt"
-    print(f"\nAppending results for model {model_name} to {output_filepath}")
-    
-    with open(output_filepath, "a+") as f:
-        f.write("="*80 + "\n")
-        f.write(f"Model: {current_model_result['model']}\n")
-        f.write(f"Params: {current_model_result['params']}\n\n")
-        
-        # --- 写入平均指标 (格式化，更适合论文) ---
-        f.write("[Overall 5-Fold Results (Mean ± Std)]\n")
-        f.write(f"  - Accuracy:           {mean_metrics['mean_test_accuracy']:.4f} ± {mean_metrics['std_test_accuracy']:.4f}\n")
-        f.write(f"  - AUROC (Macro OvR):    {mean_metrics.get('mean_test_auroc_ovr_macro', float('nan')):.4f} ± {mean_metrics.get('std_test_auroc_ovr_macro', float('nan')):.4f}\n")
-        f.write(f"  - F1 (Weighted):        {mean_metrics['mean_test_f1_weighted']:.4f} ± {mean_metrics['std_test_f1_weighted']:.4f}\n")
-        f.write(f"  - Precision (Weighted): {mean_metrics['mean_test_precision_weighted']:.4f} ± {mean_metrics['std_test_precision_weighted']:.4f}\n")
-        f.write(f"  - Recall (Weighted):    {mean_metrics['mean_test_recall_weighted']:.4f} ± {mean_metrics['std_test_recall_weighted']:.4f}\n\n")
+        output_filepath = "store/5fold_results.txt"
+        print(f"\nAppending results for model {model_name} to {output_filepath}")
 
-        f.write("  [Per-class Accuracy (Recall)]\n")
-        for name in class_names:
-            key_mean = f'mean_test_acc_{name.replace(" ", "_").lower()}'
-            key_std = f'std_test_acc_{name.replace(" ", "_").lower()}'
-            f.write(f"    - {name}: {mean_metrics[key_mean]:.4f} ± {mean_metrics[key_std]:.4f}\n")
-        f.write("\n")
-        
-        f.write("  [Binary Metrics (Healthy vs Diseased)]\n")
-        f.write(f"    - Accuracy:  {mean_metrics['mean_test_binary_accuracy']:.4f} ± {mean_metrics['std_test_binary_accuracy']:.4f}\n")
-        f.write(f"    - AUROC:     {mean_metrics.get('mean_test_binary_auroc', float('nan')):.4f} ± {mean_metrics.get('std_test_binary_auroc', float('nan')):.4f}\n")
-        f.write(f"    - F1-score:  {mean_metrics['mean_test_binary_f1']:.4f} ± {mean_metrics['std_test_binary_f1']:.4f}\n")
-        f.write(f"    - Precision: {mean_metrics['mean_test_binary_precision']:.4f} ± {mean_metrics['std_test_binary_precision']:.4f}\n")
-        f.write(f"    - Recall:    {mean_metrics['mean_test_binary_recall']:.4f} ± {mean_metrics['std_test_binary_recall']:.4f}\n\n")
+        with open(output_filepath, "a+") as f:
+            f.write("="*80 + "\n")
+            f.write(f"Model: {current_model_result['model']}\n")
+            f.write(f"Params: {current_model_result['params']}\n\n")
 
-        # --- 写入每一折的详细指标 ---
-        f.write("[Detailed Fold-by-Fold Metrics]\n")
-        for i, metrics in enumerate(current_model_result['fold_metrics'], 1):
-            f.write(f"  Fold {i}: Acc={metrics['test_accuracy']:.4f}, "
-                    f"AUROC={metrics.get('test_auroc_ovr_macro', float('nan')):.4f}, "
-                    f"F1={metrics['test_f1_weighted']:.4f}, "
-                    f"Bin_Acc={metrics['test_binary_accuracy']:.4f}, "
-                    f"Bin_F1={metrics['test_binary_f1']:.4f}\n")
-        f.write("="*80 + "\n\n")
+            # --- 写入平均指标 (格式化，更适合论文) ---
+            f.write("[Overall 5-Fold Results (Mean ± Std)]\n")
+            f.write(f"  - Accuracy:           {mean_metrics['mean_test_accuracy']:.4f} ± {mean_metrics['std_test_accuracy']:.4f}\n")
+            f.write(f"  - AUROC (Macro OvR):    {mean_metrics.get('mean_test_auroc_ovr_macro', float('nan')):.4f} ± {mean_metrics.get('std_test_auroc_ovr_macro', float('nan')):.4f}\n")
+            f.write(f"  - F1 (Weighted):        {mean_metrics['mean_test_f1_weighted']:.4f} ± {mean_metrics['std_test_f1_weighted']:.4f}\n")
+            f.write(f"  - Precision (Weighted): {mean_metrics['mean_test_precision_weighted']:.4f} ± {mean_metrics['std_test_precision_weighted']:.4f}\n")
+            f.write(f"  - Recall (Weighted):    {mean_metrics['mean_test_recall_weighted']:.4f} ± {mean_metrics['std_test_recall_weighted']:.4f}\n\n")
 
-    print("Results successfully appended.")
+            f.write("  [Per-class Accuracy (Recall)]\n")
+            for name in class_names:
+                key_mean = f'mean_test_acc_{name.replace(" ", "_").lower()}'
+                key_std = f'std_test_acc_{name.replace(" ", "_").lower()}'
+                f.write(f"    - {name}: {mean_metrics[key_mean]:.4f} ± {mean_metrics[key_std]:.4f}\n")
+            f.write("\n")
 
-#         all_fold_results.append({
-#             'model': model_name,
-#             'params': params,
-#             'fold_metrics': fold_metrics,
-#             'mean_accuracy': np.mean([m['test_accuracy'] for m in fold_metrics])
-#         })
+            f.write("  [Binary Metrics (Healthy vs Diseased)]\n")
+            f.write(f"    - Accuracy:  {mean_metrics['mean_test_binary_accuracy']:.4f} ± {mean_metrics['std_test_binary_accuracy']:.4f}\n")
+            f.write(f"    - AUROC:     {mean_metrics.get('mean_test_binary_auroc', float('nan')):.4f} ± {mean_metrics.get('std_test_binary_auroc', float('nan')):.4f}\n")
+            f.write(f"    - F1-score:  {mean_metrics['mean_test_binary_f1']:.4f} ± {mean_metrics['std_test_binary_f1']:.4f}\n")
+            f.write(f"    - Precision: {mean_metrics['mean_test_binary_precision']:.4f} ± {mean_metrics['std_test_binary_precision']:.4f}\n")
+            f.write(f"    - Recall:    {mean_metrics['mean_test_binary_recall']:.4f} ± {mean_metrics['std_test_binary_recall']:.4f}\n\n")
 
-#         with open("store/5fold_results.txt", "a+") as f:
-#             for result in all_fold_results:
-#                 f.write(f"\nModel: {result['model']}\n")
-#                 f.write(f"Params: {result['params']}\n")
-#                 f.write(f"5-Fold Mean Accuracy: {result['mean_accuracy']:.4f}\n")
-#                 for fold, metrics in enumerate(result['fold_metrics'], 1):
-#                     f.write(f"Fold {fold}: Acc={metrics['test_accuracy']:.4f}, "
-#                             f"Precision={metrics['test_precision']:.4f}, "
-#                             f"Recall={metrics['test_recall']:.4f}, "
-#                             f"F1={metrics['test_f1']:.4f}\n")
+            # --- 写入每一折的详细指标 ---
+            f.write("[Detailed Fold-by-Fold Metrics]\n")
+            for i, metrics in enumerate(current_model_result['fold_metrics'], 1):
+                f.write(f"  Fold {i}: Acc={metrics['test_accuracy']:.4f}, "
+                        f"AUROC={metrics.get('test_auroc_ovr_macro', float('nan')):.4f}, "
+                        f"F1={metrics['test_f1_weighted']:.4f}, "
+                        f"Bin_Acc={metrics['test_binary_accuracy']:.4f}, "
+                        f"Bin_F1={metrics['test_binary_f1']:.4f}\n")
+            f.write("="*80 + "\n\n")
+
+            # 在写入文本文件部分增加
+            f.write("[Confusion Matrix (Counts)]\n")
+            for i, row in enumerate(cm_df.values):
+                row_str = "  " + class_names_fixed[i] + ": " + " ".join(f"{int(x):4d}" for x in row)
+                f.write(row_str + "\n")
+            f.write("\n")
+
+            f.write("[Confusion Matrix (Row-normalized)]\n")
+            for i, row in enumerate(norm_df.values):
+                row_str = "  " + class_names_fixed[i] + ": " + " ".join(f"{x:.2f}" for x in row)
+                f.write(row_str + "\n")
+            f.write("\n")
+
+        print("Results successfully appended.")
+

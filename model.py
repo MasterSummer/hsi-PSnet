@@ -93,12 +93,43 @@ class MultiModalNet(nn.Module):
             nn.Linear(mid_dim, num_classes),
         )
 
-    def forward(self, rgb, hsi):
-        f_rgb = self.fc_rgb(self.rgb_encoder(rgb) ) # RGB 特征
-        f_hsi = self.fc_hsi(self.hsi_encoder(hsi) ) # HSI 特征
+    def forward(self, rgb, hsi, return_features: bool = False, return_attn: bool = False):
+        hsi_out = self.hsi_encoder(
+            hsi,
+            return_tokens=return_attn,  # 只在需要注意力时取回token，避免额外开销
+            return_attn=return_attn
+        )
+        if isinstance(hsi_out, tuple):
+            hsi_feat_cls, hsi_info = hsi_out
+        else:
+            hsi_feat_cls, hsi_info = hsi_out, {}
+
+        f_rgb = self.fc_rgb(self.rgb_encoder(rgb))  # RGB 特征
+        f_hsi = self.fc_hsi(hsi_feat_cls)  # HSI 特征 (缩放后)
         fused = torch.cat([f_rgb, f_hsi], dim=1)  # 拼接融合
-        output = self.mlp(fused)  # 分类
-        return output
+
+        # 手动拆开分类器，便于拿到分类前的隐藏向量
+        hidden = self.mlp[0](fused)
+        hidden = self.mlp[1](hidden)
+        logits = self.mlp[2](hidden)
+
+        if return_features or return_attn:
+            extras = {
+                'fused': fused,
+                'pre_logits': hidden,
+                'hsi_proj': f_hsi,
+                'hsi_encoder_output': hsi_feat_cls,
+                'rgb_feat': f_rgb,
+            }
+            if return_attn:
+                extras.update({
+                    'hsi_tokens': hsi_info.get('tokens'),
+                    'hsi_attention': hsi_info.get('attn_maps'),
+                    'hsi_cls_token': hsi_info.get('cls_token'),
+                })
+            return logits, extras
+
+        return logits
     
 
 import torch
