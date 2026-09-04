@@ -25,6 +25,17 @@ Use `treatment=mock` or `infected` and `dpi=2`, `4`, or `6`. Add `hsi_layout=HWC
 
 For red-edge calculations, supply a CSV with exactly two columns, `band,wavelength_nm`, one row per usable band.
 
+For the original Run-1 filenames (`Plant7_Infected_Leaf3_Day2.RGB888`), build metadata with:
+
+```bash
+python -m reviewer_experiments.cli ingest-run1 \
+  --rgb-root /absolute/path/to/Run\ 1 \
+  --hsi-root /absolute/path/to/hsi_npy \
+  --output /absolute/path/to/metadata.csv
+```
+
+The importer treats `.RGB888` files as the JPEG images they contain, matches HSI files by filename stem, and restores the 24 repeatedly measured mock plants from source number ranges 1-24, 25-48, and 49-72. It refuses to report multimodal readiness when any HSI file is missing.
+
 ## Installation
 
 ```bash

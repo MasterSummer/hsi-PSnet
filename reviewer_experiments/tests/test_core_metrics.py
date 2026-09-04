@@ -38,6 +38,15 @@ class CoreMetricsTest(unittest.TestCase):
             prepare_tasks(root / "metadata.csv", root / "tasks", 3, 11)
             self.assertTrue((root / "tasks" / "presymptomatic_2_4.csv").exists())
 
+    def test_empty_hsi_path_fails_file_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = self.metadata().drop(columns="label")
+            frame["hsi_path"] = ""
+            frame.to_csv(root / "metadata.csv", index=False)
+            with self.assertRaisesRegex(ValueError, "hsi_path:<empty>"):
+                prepare_tasks(root / "metadata.csv", root / "tasks", 3, 11, require_files=True)
+
     def test_plant_aggregation_and_metrics(self):
         predictions = pd.DataFrame([
             {"model": "psnet_full", "task": "dpi_2", "seed": 1, "plant_id": "a", "label": 0, "prob_infected": 0.1},
