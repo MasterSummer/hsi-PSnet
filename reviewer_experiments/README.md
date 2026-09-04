@@ -60,6 +60,12 @@ aggregates plant-level metrics, performs spectral statistics and band
 occlusion, and profiles computational cost. Existing completed folds are
 retained when the command is restarted.
 
+The importer records the observed sample count rather than silently assuming
+576 complete pairs. If a nominal plant/leaf/day combination is absent, it
+writes `metadata.missing_expected.csv`, reports the discrepancy, and continues
+with the available plants. A non-96 plant count remains a hard error because it
+would change the biological partitioning design.
+
 The full-run defaults (`dim=64`, five transformer layers, four heads,
 `dropout=0.5`, and ImageNet-pretrained ResNet-34 weights) follow the settings
 used by the Git-tracked `main.py` and `model.py`. Every value can be overridden

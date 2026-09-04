@@ -104,9 +104,16 @@ if not summary["multimodal_ready"]:
         f"RGB paths are missing for {summary['missing_rgb']} samples. "
         "Set RGB_ROOT to the server directory containing the matching RGB files."
     )
-if summary["samples"] != 576 or summary["plants"] != 96:
-    raise SystemExit(f"Unexpected dataset size: {summary['samples']} samples, {summary['plants']} plants")
-print("Dataset identity: 576 samples from 96 biological plants")
+if summary["plants"] != 96:
+    raise SystemExit(f"Unexpected biological plant count: {summary['plants']} (expected 96)")
+if not summary["design_complete"]:
+    print(
+        "WARNING: the PT bundles do not contain the complete 576-pair design: "
+        f"observed={summary['samples']}, missing_expected={summary['missing_expected_samples']}, "
+        f"unexpected={summary['unexpected_samples']}. "
+        "The analysis will use the observed samples and retain an audit trail."
+    )
+print(f"Dataset identity: {summary['samples']} observed samples from {summary['plants']} biological plants")
 PY
 
 "${PYTHON_BIN}" -m reviewer_experiments.cli audit \

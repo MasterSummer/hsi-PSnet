@@ -71,6 +71,8 @@ class IngestTest(unittest.TestCase):
             summary = build_split4re_metadata(split, split / "metadata.csv")
             frame = pd.read_csv(split / "metadata.csv")
             self.assertEqual(summary["samples"], 2)
+            self.assertFalse(summary["design_complete"])
+            self.assertTrue((split / "metadata.missing_expected.csv").is_file())
             self.assertEqual(frame.loc[frame.treatment == "mock", "plant_id"].iloc[0], "run1_mock_p001")
             loaded = load_hsi(frame.loc[frame.treatment == "infected", "hsi_path"].iloc[0], "CHW")
             np.testing.assert_array_equal(loaded, infected_hsi.numpy())

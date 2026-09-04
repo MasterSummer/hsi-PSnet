@@ -201,9 +201,29 @@ def build_split4re_metadata(
     if frame.sample_id.duplicated().any():
         duplicates = frame.loc[frame.sample_id.duplicated(False), "sample_id"].tolist()
         raise ValueError(f"duplicate biological sample IDs across PT bundles: {duplicates[:10]}")
+    expected_sample_ids = {
+        f"{run_id}_infected_p{plant:03d}_l{leaf}_d{dpi}"
+        for plant in range(1, 73)
+        for leaf in (3, 4)
+        for dpi in (2, 4, 6)
+    } | {
+        f"{run_id}_mock_p{plant:03d}_l{leaf}_d{dpi}"
+        for plant in range(1, 25)
+        for leaf in (3, 4)
+        for dpi in (2, 4, 6)
+    }
+    observed_sample_ids = set(frame.sample_id)
+    missing_expected = sorted(expected_sample_ids - observed_sample_ids)
+    unexpected = sorted(observed_sample_ids - expected_sample_ids)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output, index=False)
+    pd.DataFrame({"missing_expected_sample_id": missing_expected}).to_csv(
+        output.with_suffix(".missing_expected.csv"), index=False
+    )
+    pd.DataFrame({"unexpected_sample_id": unexpected}).to_csv(
+        output.with_suffix(".unexpected.csv"), index=False
+    )
     summary: dict[str, object] = {
         "split_dir": str(split_dir),
         "samples": int(len(frame)),
@@ -212,6 +232,11 @@ def build_split4re_metadata(
         "missing_rgb": len(missing_rgb),
         "pt_bundles": [str(path) for path in bundle_paths],
         "multimodal_ready": len(missing_rgb) == 0,
+        "expected_design_samples": len(expected_sample_ids),
+        "missing_expected_samples": len(missing_expected),
+        "missing_expected_sample_ids": missing_expected,
+        "unexpected_samples": len(unexpected),
+        "design_complete": not missing_expected and not unexpected,
         "source_split_note": "Legacy train/test membership is recorded only for provenance; reviewer folds are reassigned by biological plant.",
     }
     output.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
