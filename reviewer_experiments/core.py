@@ -74,6 +74,14 @@ def validate_metadata(frame: pd.DataFrame, require_files: bool = False) -> None:
 
     if require_files:
         metadata_root = Path(frame.attrs.get("metadata_root", "."))
+        empty = [
+            f"{column}:<empty>"
+            for column in ("rgb_path", "hsi_path")
+            for value in frame[column]
+            if pd.isna(value) or not str(value).strip()
+        ]
+        if empty:
+            raise ValueError(f"empty referenced paths (first 10): {empty[:10]}")
         absent: list[str] = []
         for column in ("rgb_path", "hsi_path"):
             for value in frame[column]:
@@ -141,4 +149,3 @@ def prepare_tasks(
     (output / "split_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
-

@@ -6,6 +6,7 @@ from pathlib import Path
 from .attribution import band_occlusion
 from .audit import metadata_audit
 from .core import TASK_DPI, prepare_tasks
+from .ingest import build_run1_metadata
 from .metrics import evaluate_predictions
 from .models import MODEL_NAMES, build_model, trainable_parameters
 from .profile import profile_models
@@ -55,6 +56,12 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--folds", type=int, default=5)
     prepare.add_argument("--seed", type=int, default=157)
     prepare.add_argument("--require-files", action="store_true")
+
+    ingest = commands.add_parser("ingest-run1", help="build metadata from Run-1 RGB names and optional HSI files")
+    ingest.add_argument("--rgb-root", required=True)
+    ingest.add_argument("--hsi-root")
+    ingest.add_argument("--run-id", default="run1")
+    ingest.add_argument("--output", required=True)
 
     train = commands.add_parser("train", help="train one model/task/seed/fold")
     train.add_argument("--task-csv", required=True)
@@ -125,6 +132,10 @@ def main() -> None:
     args = parser().parse_args()
     if args.command == "prepare":
         prepare_tasks(args.metadata, args.output, args.folds, args.seed, args.require_files)
+    elif args.command == "ingest-run1":
+        summary = build_run1_metadata(args.rgb_root, args.output, args.hsi_root, args.run_id)
+        for key, value in summary.items():
+            print(f"{key}: {value}")
     elif args.command == "train":
         train_fold(args.task_csv, args.model, args.seed, args.fold, args.output, **training_kwargs(args))
     elif args.command == "matrix":
