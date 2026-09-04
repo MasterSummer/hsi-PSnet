@@ -125,13 +125,27 @@ def train_fold(
     return output / "predictions.csv"
 
 
-def run_matrix(task_dir: str | Path, output: str | Path, tasks: list[str], models: list[str], seeds: list[int], folds: list[int], **kwargs) -> list[Path]:
+def run_matrix(
+    task_dir: str | Path,
+    output: str | Path,
+    tasks: list[str],
+    models: list[str],
+    seeds: list[int],
+    folds: list[int],
+    force: bool = False,
+    **kwargs,
+) -> list[Path]:
     predictions = []
     for task in tasks:
         for model in models:
             for seed in seeds:
                 for fold in folds:
-                    predictions.append(train_fold(Path(task_dir) / f"{task}.csv", model, seed, fold, output, **kwargs))
+                    expected = Path(output) / model / task / f"seed_{seed}" / f"fold_{fold}" / "predictions.csv"
+                    if expected.is_file() and not force:
+                        print(f"resume: keeping {expected}")
+                        predictions.append(expected)
+                    else:
+                        predictions.append(train_fold(Path(task_dir) / f"{task}.csv", model, seed, fold, output, **kwargs))
     manifest = Path(output) / "prediction_manifest.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text("\n".join(map(str, predictions)) + "\n", encoding="utf-8")

@@ -36,9 +36,9 @@ python -m reviewer_experiments.cli ingest-run1 \
 
 The importer treats `.RGB888` files as the JPEG images they contain, matches HSI files by filename stem, and restores the 24 repeatedly measured mock plants from source number ranges 1-24, 25-48, and 49-72. It refuses to report multimodal readiness when any HSI file is missing.
 
-If the server dataset is already stored as `split_4re/trainval.pt` and
-`split_4re/cleantest.pt`, use the PT bundles directly without extracting or
-duplicating the HSI tensors:
+If the server dataset is stored as `split_4re/trainval.pt` and
+`split_4re/cleantest.pt`, the HSI tensors can be read directly without
+extracting or duplicating them:
 
 ```bash
 python -m reviewer_experiments.cli ingest-split4re \
@@ -46,20 +46,37 @@ python -m reviewer_experiments.cli ingest-split4re \
   --output split_4re/metadata.csv
 ```
 
-If the RGB paths embedded in the PT files belong to another machine, provide
-the server directory containing the matching RGB files:
+If the RGB paths embedded in those bundles refer to another machine, add
+`--rgb-root /absolute/server/path/to/RGB`. The legacy train/test membership is
+recorded only as provenance; all reviewer experiments create new
+plant-disjoint folds across the 96 biological plants.
+
+## One-command server run
+
+The repository root contains `run_all_reviewer_experiments.sh`. It validates
+the two `split_4re` bundles, reconstructs metadata, performs all five binary
+tasks, runs all baselines and ablations over three seeds and five folds,
+aggregates plant-level metrics, performs spectral statistics and band
+occlusion, and profiles computational cost. Existing completed folds are
+retained when the command is restarted.
+
+The full-run defaults (`dim=64`, five transformer layers, four heads,
+`dropout=0.5`, and ImageNet-pretrained ResNet-34 weights) follow the settings
+used by the Git-tracked `main.py` and `model.py`. Every value can be overridden
+through the environment variables documented at the top of the script.
 
 ```bash
-python -m reviewer_experiments.cli ingest-split4re \
-  --split-dir split_4re \
-  --rgb-root /absolute/server/path/to/RGB \
-  --output split_4re/metadata.csv
+chmod +x run_all_reviewer_experiments.sh
+SPLIT_DIR="$PWD/split_4re" \
+OUTPUT_ROOT="$PWD/reviewer_results" \
+DEVICE=cuda \
+./run_all_reviewer_experiments.sh
 ```
 
-The generated `ptbundle:` references read HSI tensors from `split_4re` in
-place. The old train/test membership is retained only as provenance; the
-reviewer analysis creates new plant-disjoint folds from all 96 biological
-plants.
+If RGB paths stored in the PT files are stale, also set `RGB_ROOT`. Put a
+`band,wavelength_nm` table at `split_4re/wavelengths.csv`, or set
+`WAVELENGTHS_CSV`; without it the script completes the band-index analysis but
+explicitly marks physical red-edge metrics incomplete.
 
 ## Installation
 

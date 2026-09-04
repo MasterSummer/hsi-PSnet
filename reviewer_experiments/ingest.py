@@ -162,7 +162,10 @@ def build_split4re_metadata(
             values = match.groupdict()
             dpi = int(values["dpi"])
             treatment = "infected" if values["treatment"].lower() == "infected" else "mock"
-            expected_label = 0 if treatment == "mock" else {2: 1, 4: 2, 6: 3}[dpi]
+            # split4re.py writes the four-way source labels in the repository's
+            # class order: 2 dpi=0, 4 dpi=1, 6 dpi=2, Healthy=3.  The reviewer
+            # pipeline later derives its binary target from ``treatment``.
+            expected_label = 3 if treatment == "mock" else {2: 0, 4: 1, 6: 2}[dpi]
             if int(stored_label) != expected_label:
                 raise ValueError(
                     f"label mismatch in {bundle_path.name}[{index}]: stored={stored_label}, expected={expected_label}"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .attribution import band_occlusion
+from .attribution import aggregate_occlusion, band_occlusion
 from .audit import metadata_audit
 from .core import TASK_DPI, prepare_tasks
 from .ingest import build_run1_metadata, build_split4re_metadata
@@ -84,6 +84,7 @@ def parser() -> argparse.ArgumentParser:
     matrix.add_argument("--seeds", type=csv_ints, default=[157, 257, 357])
     matrix.add_argument("--folds", type=csv_ints, default=[1, 2, 3, 4, 5])
     matrix.add_argument("--output", required=True)
+    matrix.add_argument("--force", action="store_true", help="rerun folds even when predictions.csv exists")
     add_training_options(matrix)
 
     evaluate = commands.add_parser("evaluate", help="plant aggregation, confidence intervals, raw confusion matrices")
@@ -111,6 +112,11 @@ def parser() -> argparse.ArgumentParser:
     occlusion.add_argument("--workers", type=int, default=0)
     occlusion.add_argument("--device", default="auto")
     occlusion.add_argument("--output", required=True)
+
+    aggregate_attr = commands.add_parser("aggregate-occlusion", help="combine band-occlusion results across folds and seeds")
+    aggregate_attr.add_argument("--inputs", nargs="+", required=True)
+    aggregate_attr.add_argument("--wavelengths")
+    aggregate_attr.add_argument("--output", required=True)
 
     params = commands.add_parser("params", help="report trainable parameter counts")
     params.add_argument("--bands", type=int, required=True)
@@ -149,7 +155,7 @@ def main() -> None:
     elif args.command == "train":
         train_fold(args.task_csv, args.model, args.seed, args.fold, args.output, **training_kwargs(args))
     elif args.command == "matrix":
-        run_matrix(args.task_dir, args.output, args.tasks, args.models, args.seeds, args.folds, **training_kwargs(args))
+        run_matrix(args.task_dir, args.output, args.tasks, args.models, args.seeds, args.folds, args.force, **training_kwargs(args))
     elif args.command == "evaluate":
         evaluate_predictions(args.inputs, args.output, args.bootstrap, args.seed)
     elif args.command == "spectral":
@@ -158,7 +164,10 @@ def main() -> None:
         metadata_audit(args.metadata, args.output)
     elif args.command == "occlusion":
         band_occlusion(args.checkpoint, args.task_csv, args.output, args.data_root, args.group_size, args.batch_size, args.workers, args.device)
+    elif args.command == "aggregate-occlusion":
+        aggregate_occlusion(args.inputs, args.output, args.wavelengths)
     elif args.command == "params":
+        print("model,trainable_parameters")
         for name in MODEL_NAMES:
             model = build_model(name, args.bands, args.dim, args.depth, args.heads)
             print(f"{name},{trainable_parameters(model)}")

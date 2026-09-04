@@ -224,6 +224,8 @@ MODEL_NAMES = (
     "psnet_learnable_cls",
     "plain_multimodal",
     "rgb_resnet18",
+    "rgb_resnet34",
+    "hsi_transformer",
     "spectral_1d_cnn",
     "compact_3d_cnn",
     "simple_multimodal",
@@ -241,6 +243,14 @@ def build_model(
 ) -> nn.Module:
     if name == "rgb_resnet18":
         return Classifier(RGBEncoder(dim, "resnet18", rgb_pretrained), "rgb", dim)
+    if name == "rgb_resnet34":
+        return Classifier(RGBEncoder(dim, "resnet34", rgb_pretrained), "rgb", dim)
+    if name == "hsi_transformer":
+        return Classifier(
+            HSITransformerEncoder(bands, dim, depth, heads, dropout, "wavelet", True, True),
+            "hsi",
+            dim,
+        )
     if name == "spectral_1d_cnn":
         return Classifier(Spectral1DEncoder(dim), "hsi", dim)
     if name == "compact_3d_cnn":
@@ -271,4 +281,3 @@ def build_model(
         use_3d_patch=use_3d_patch,
         rgb_pretrained=rgb_pretrained,
     )
-
