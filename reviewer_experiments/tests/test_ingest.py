@@ -40,6 +40,15 @@ class IngestTest(unittest.TestCase):
             self.assertEqual(set(frame.source_plant_number), {1, 25, 49})
             self.assertEqual(summary["plants"], 1)
 
+    def test_jpg_extension_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rgb = root / "rgb" / "2dpi"
+            rgb.mkdir(parents=True)
+            (rgb / "Plant1_Infected_Leaf3_Day2.jpg").write_bytes(b"jpeg-placeholder")
+            summary = build_run1_metadata(root / "rgb", root / "metadata.csv")
+            self.assertEqual(summary["samples"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
