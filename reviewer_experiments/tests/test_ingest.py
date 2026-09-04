@@ -6,8 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
-from reviewer_experiments.ingest import build_run1_metadata
+from reviewer_experiments.data import load_hsi
+from reviewer_experiments.ingest import build_run1_metadata, build_split4re_metadata
 
 
 class IngestTest(unittest.TestCase):
@@ -48,6 +50,30 @@ class IngestTest(unittest.TestCase):
             (rgb / "Plant1_Infected_Leaf3_Day2.jpg").write_bytes(b"jpeg-placeholder")
             summary = build_run1_metadata(root / "rgb", root / "metadata.csv")
             self.assertEqual(summary["samples"], 1)
+
+    def test_split4re_pt_bundles_are_used_directly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split = root / "split_4re"
+            rgb = root / "rgb"
+            split.mkdir()
+            rgb.mkdir()
+            infected_name = "Plant1_Infected_Leaf3_Day2"
+            mock_name = "Plant25_Healthy_Leaf3_Day4"
+            infected_rgb = rgb / f"{infected_name}.jpg"
+            mock_rgb = rgb / f"{mock_name}.jpg"
+            infected_rgb.write_bytes(b"jpeg-placeholder")
+            mock_rgb.write_bytes(b"jpeg-placeholder")
+            infected_hsi = torch.ones(3, 2, 2)
+            mock_hsi = torch.zeros(3, 2, 2)
+            torch.save([(str(infected_rgb), infected_hsi, 1)], split / "trainval.pt")
+            torch.save([(str(mock_rgb), mock_hsi, 0)], split / "cleantest.pt")
+            summary = build_split4re_metadata(split, split / "metadata.csv")
+            frame = pd.read_csv(split / "metadata.csv")
+            self.assertEqual(summary["samples"], 2)
+            self.assertEqual(frame.loc[frame.treatment == "mock", "plant_id"].iloc[0], "run1_mock_p001")
+            loaded = load_hsi(frame.loc[frame.treatment == "infected", "hsi_path"].iloc[0], "CHW")
+            np.testing.assert_array_equal(loaded, infected_hsi.numpy())
 
 
 if __name__ == "__main__":

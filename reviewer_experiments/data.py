@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import random
 
@@ -11,15 +12,52 @@ from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 
 
-def resolve_path(value: str, root: str | Path | None) -> Path:
+PT_BUNDLE_PREFIX = "ptbundle:"
+
+
+def resolve_path(value: str, root: str | Path | None) -> Path | str:
+    if str(value).startswith(PT_BUNDLE_PREFIX):
+        return str(value)
     path = Path(str(value)).expanduser()
     if not path.is_absolute() and root is not None:
         path = Path(root) / path
     return path
 
 
+def make_pt_bundle_uri(path: str | Path, index: int) -> str:
+    return f"{PT_BUNDLE_PREFIX}{Path(path).expanduser().resolve()}::{int(index)}"
+
+
+def parse_pt_bundle_uri(value: str) -> tuple[Path, int]:
+    if not value.startswith(PT_BUNDLE_PREFIX) or "::" not in value:
+        raise ValueError(f"invalid PT bundle URI: {value}")
+    path, index = value[len(PT_BUNDLE_PREFIX):].rsplit("::", 1)
+    return Path(path), int(index)
+
+
+@lru_cache(maxsize=4)
+def _load_pt_bundle(path: str):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
 def load_hsi(path: str | Path, layout: str = "auto") -> np.ndarray:
-    loaded = np.load(path)
+    path_value = str(path)
+    if path_value.startswith(PT_BUNDLE_PREFIX):
+        bundle_path, index = parse_pt_bundle_uri(path_value)
+        bundle = _load_pt_bundle(str(bundle_path))
+        if index < 0 or index >= len(bundle):
+            raise IndexError(f"PT bundle index {index} is outside {bundle_path}")
+        item = bundle[index]
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            raise ValueError(f"unexpected item {index} in {bundle_path}")
+        loaded = item[1]
+        if isinstance(loaded, torch.Tensor):
+            loaded = loaded.detach().cpu().numpy()
+    else:
+        loaded = np.load(path)
     if isinstance(loaded, np.lib.npyio.NpzFile):
         keys = list(loaded.files)
         if len(keys) != 1:
@@ -119,4 +157,3 @@ class PairedDataset(Dataset):
                 hsi = torch.flip(hsi, dims=[1])
         label = int(row.label)
         return rgb, hsi, label, str(row.sample_id), str(row.plant_id)
-
