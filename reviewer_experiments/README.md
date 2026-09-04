@@ -36,6 +36,31 @@ python -m reviewer_experiments.cli ingest-run1 \
 
 The importer treats `.RGB888` files as the JPEG images they contain, matches HSI files by filename stem, and restores the 24 repeatedly measured mock plants from source number ranges 1-24, 25-48, and 49-72. It refuses to report multimodal readiness when any HSI file is missing.
 
+If the server dataset is already stored as `split_4re/trainval.pt` and
+`split_4re/cleantest.pt`, use the PT bundles directly without extracting or
+duplicating the HSI tensors:
+
+```bash
+python -m reviewer_experiments.cli ingest-split4re \
+  --split-dir split_4re \
+  --output split_4re/metadata.csv
+```
+
+If the RGB paths embedded in the PT files belong to another machine, provide
+the server directory containing the matching RGB files:
+
+```bash
+python -m reviewer_experiments.cli ingest-split4re \
+  --split-dir split_4re \
+  --rgb-root /absolute/server/path/to/RGB \
+  --output split_4re/metadata.csv
+```
+
+The generated `ptbundle:` references read HSI tensors from `split_4re` in
+place. The old train/test membership is retained only as provenance; the
+reviewer analysis creates new plant-disjoint folds from all 96 biological
+plants.
+
 ## Installation
 
 ```bash

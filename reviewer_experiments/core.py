@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
+from .data import PT_BUNDLE_PREFIX, parse_pt_bundle_uri
+
 
 REQUIRED_COLUMNS = {
     "sample_id",
@@ -86,6 +88,8 @@ def validate_metadata(frame: pd.DataFrame, require_files: bool = False) -> None:
         for column in ("rgb_path", "hsi_path"):
             for value in frame[column]:
                 candidate = Path(str(value)).expanduser()
+                if str(value).startswith(PT_BUNDLE_PREFIX):
+                    candidate, _ = parse_pt_bundle_uri(str(value))
                 if not candidate.is_absolute():
                     candidate = metadata_root / candidate
                 if not candidate.exists():
