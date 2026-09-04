@@ -43,7 +43,11 @@ def build_run1_metadata(
     rows = []
     unmatched = []
     malformed = []
-    for rgb_path in sorted(rgb_root.rglob("*.RGB888")):
+    rgb_files = sorted(
+        path for path in rgb_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".rgb888", ".jpg", ".jpeg"}
+    )
+    for rgb_path in rgb_files:
         if rgb_path.stem.lower() == "dark":
             continue
         match = NAME_PATTERN.match(rgb_path.stem)
