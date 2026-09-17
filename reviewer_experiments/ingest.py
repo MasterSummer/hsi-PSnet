@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 
 from .data import make_pt_bundle_uri
+from .pt_labels import audit_pt_labels, stored_label_value
 
 
 NAME_PATTERN = re.compile(
@@ -155,18 +156,14 @@ def build_split4re_metadata(
             if not isinstance(item, (tuple, list)) or len(item) < 3:
                 raise ValueError(f"unexpected item {index} in {bundle_path}")
             original_rgb, hsi, stored_label = item[:3]
-            original_rgb = Path(str(original_rgb)).expanduser()
+            original_rgb = Path(str(original_rgb).replace("\\", "/")).expanduser()
             match = NAME_PATTERN.match(original_rgb.stem)
             if match is None:
                 raise ValueError(f"cannot parse plant/leaf/day from PT RGB path: {original_rgb}")
             values = match.groupdict()
             dpi = int(values["dpi"])
             treatment = "infected" if values["treatment"].lower() == "infected" else "mock"
-            expected_label = 0 if treatment == "mock" else {2: 1, 4: 2, 6: 3}[dpi]
-            if int(stored_label) != expected_label:
-                raise ValueError(
-                    f"label mismatch in {bundle_path.name}[{index}]: stored={stored_label}, expected={expected_label}"
-                )
+            stored_label = stored_label_value(stored_label)
             source_plant_number = int(values["plant"])
             plant_number = source_plant_number if treatment == "infected" else (source_plant_number - 1) % 24 + 1
             leaf_number = int(values["leaf"])
@@ -193,11 +190,14 @@ def build_split4re_metadata(
                 "hsi_layout": "CHW",
                 "symptom_status": "presymptomatic" if dpi in (2, 4) else "symptomatic",
                 "source_split": source_split,
+                "stored_label": stored_label,
             })
     frame = pd.DataFrame(rows)
     if frame.sample_id.duplicated().any():
         duplicates = frame.loc[frame.sample_id.duplicated(False), "sample_id"].tolist()
         raise ValueError(f"duplicate biological sample IDs across PT bundles: {duplicates[:10]}")
+    label_audit = audit_pt_labels(frame)
+    print(f"PT label encoding: {label_audit['encoding']}", flush=True)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output, index=False)
@@ -210,6 +210,7 @@ def build_split4re_metadata(
         "pt_bundles": [str(path) for path in bundle_paths],
         "multimodal_ready": len(missing_rgb) == 0,
         "source_split_note": "Legacy train/test membership is recorded only for provenance; reviewer folds are reassigned by biological plant.",
+        "pt_label_audit": label_audit,
     }
     output.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary

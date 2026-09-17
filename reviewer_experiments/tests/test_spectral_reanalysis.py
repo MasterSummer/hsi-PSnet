@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import subprocess
 import sys
+import json
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,17 @@ class SpectralTests(unittest.TestCase):
             self.assertIn('1', plants.columns)
             statistics = pd.read_csv(root/'out/within_dpi_band_statistics.csv')
             self.assertEqual(statistics.band.tolist(), [1, 1, 1])
+            # Older bundles store infected 2/4/6 dpi as 0/1/2 and mock as 3.
+            legacy = [(path, cube, (label-1) % 4) for path, cube, label in records]
+            torch.save(legacy[::2], root/'trainval.pt')
+            torch.save(legacy[1::2], root/'cleantest.pt')
+            command[-1] = str(root/'legacy')
+            run = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            pd.testing.assert_frame_equal(statistics, pd.read_csv(root/'legacy/within_dpi_band_statistics.csv'))
+            audit = json.loads((root/'legacy/pt_label_audit.json').read_text())
+            self.assertEqual(audit['encoding'], 'infected012_mock3')
+            self.assertEqual(sum(row['observations'] for row in audit['observed_counts']), len(records))
 
     def test_pt_duplicate_and_label_checks(self):
         import torch
@@ -107,7 +119,7 @@ class SpectralTests(unittest.TestCase):
             torch.save([item], root/'b.pt')
             with self.assertRaisesRegex(ValueError, 'Duplicate biological'):
                 metadata_from_pt([root/'a.pt', root/'b.pt'])
-            torch.save([(item[0], item[1], 0)], root/'bad.pt')
+            torch.save([(item[0], item[1], 9)], root/'bad.pt')
             with self.assertRaisesRegex(ValueError, 'disagrees'):
                 metadata_from_pt([root/'bad.pt'])
         pt_bundle.cache_clear()

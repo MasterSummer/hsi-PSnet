@@ -15,6 +15,7 @@ import pandas as pd
 import scipy
 from scipy import stats
 from .bands import parse_bands
+from .pt_labels import audit_pt_labels, stored_label_value
 
 
 KEYS = ["plant_id", "treatment", "dpi"]
@@ -174,17 +175,15 @@ def metadata_from_pt(paths, layout="CHW", mask_root=None):
             dpi, plant, leaf = int(info["dpi"]), int(info["plant"]), int(info["leaf"])
             if plant < 1 or leaf < 1:
                 raise ValueError(f"Nonpositive plant/leaf ID: {stem}")
-            expected = 0 if treatment == "mock" else {2: 1, 4: 2, 6: 3}[dpi]
-            scalar = label.item() if hasattr(label, "item") else label
-            if float(scalar) != expected:
-                raise ValueError(f"{path}[{index}]: stored label {scalar} disagrees with filename (expected {expected})")
+            scalar = stored_label_value(label)
             if not isinstance(hsi, np.ndarray) and not hasattr(hsi, "detach"):
                 raise ValueError(f"{path}[{index}]: HSI must be a tensor or ndarray")
             record = dict(sample_id=f"run1_{treatment}_p{plant:03d}_l{leaf}_d{dpi}",
                           plant_id=f"run1_{treatment}_p{plant:03d}", leaf_id=str(leaf),
                           treatment=treatment, dpi=dpi, source_plant_number=plant,
                           hsi_path=f"ptbundle:{path}::{index}", hsi_layout=layout,
-                          original_rgb_path=str(rgb_path), source_bundle=str(path), source_index=index)
+                          original_rgb_path=str(rgb_path), source_bundle=str(path), source_index=index,
+                          stored_label=scalar)
             if mask_root is not None:
                 record["mask_path"] = str((mask_root.expanduser().resolve() / f"{stem}.npy"))
             rows.append(record)
@@ -193,6 +192,8 @@ def metadata_from_pt(paths, layout="CHW", mask_root=None):
     if frame.sample_id.duplicated().any():
         duplicates = frame.loc[frame.sample_id.duplicated(False), "sample_id"].tolist()
         raise ValueError(f"Duplicate biological observations across PT inputs: {duplicates[:10]}")
+    frame.attrs["pt_label_audit"] = audit_pt_labels(frame)
+    print(f"PT label encoding: {frame.attrs['pt_label_audit']['encoding']}", flush=True)
     return frame
 
 
@@ -340,6 +341,8 @@ def main():
         raise ValueError("No bands remain after selection and calibration filtering")
     result, summary = analyze(plants, bands, wavelengths, args.alpha)
     args.output.mkdir(parents=True, exist_ok=True)
+    if direct_pt:
+        (args.output / "pt_label_audit.json").write_text(json.dumps(frame.attrs["pt_label_audit"], indent=2), encoding="utf-8")
     identifiers = [c for c in plants.columns if c not in original_bands]
     plants[identifiers + bands].to_csv(args.output / "plant_mean_spectra.csv", index=False)
     result.to_csv(args.output / "within_dpi_band_statistics.csv", index=False)

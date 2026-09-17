@@ -74,6 +74,19 @@ class IngestTest(unittest.TestCase):
             self.assertEqual(frame.loc[frame.treatment == "mock", "plant_id"].iloc[0], "run1_mock_p001")
             loaded = load_hsi(frame.loc[frame.treatment == "infected", "hsi_path"].iloc[0], "CHW")
             np.testing.assert_array_equal(loaded, infected_hsi.numpy())
+            torch.save([(f'Z:\\old\\{infected_name}.jpg', infected_hsi, 0)], split / "trainval.pt")
+            torch.save([(f'Z:\\old\\{mock_name}.jpg', mock_hsi, 3)], split / "cleantest.pt")
+            legacy = build_split4re_metadata(split, split / "legacy.csv", rgb_root=rgb)
+            self.assertEqual(legacy['pt_label_audit']['encoding'], 'infected012_mock3')
+            self.assertTrue(legacy['multimodal_ready'])
+            legacy_frame = pd.read_csv(split / "legacy.csv")
+            pd.testing.assert_frame_equal(frame[['sample_id', 'plant_id', 'treatment', 'dpi']],
+                                          legacy_frame[['sample_id', 'plant_id', 'treatment', 'dpi']])
+            self.assertEqual(legacy_frame.stored_label.tolist(), [0, 3])
+            # Canonical labels in one file and legacy labels in the other must fail.
+            torch.save([(str(mock_rgb), mock_hsi, 0)], split / "cleantest.pt")
+            with self.assertRaisesRegex(ValueError, 'Mixed or unknown'):
+                build_split4re_metadata(split, split / "mixed.csv", rgb_root=rgb)
 
 
 if __name__ == "__main__":

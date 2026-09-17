@@ -2,6 +2,8 @@
 
 两个入口都直接支持已有 `split_4re/trainval.pt` 和 `cleantest.pt`。统计无需 RGB 原图；多模态训练需要原 RGB 图像。PT 数据须为本项目的可信数据包，即 `(rgb_path, hsi_tensor, class_label)` 记录列表。
 
+两个入口会联合检查所有 PT 记录，自动识别两种标签编码：`mock=0，2/4/6 dpi接种=1/2/3`，或旧编码 `2/4/6 dpi接种=0/1/2，mock=3`。只有整个输入集合与其中一种编码一致才继续；混用或未知编码会报错并列出对应计数。处理组、日期、植株身份由文件名解析；二分类标签由处理组生成，不能直接使用 `stored_label > 0`。统计输出 `pt_label_audit.json`，训练导入的 `metadata.summary.json` 保存编码与计数，逐条元数据保留原标签。无需改写 PT 文件。
+
 ## 1. 安装
 
 在仓库根目录，用现有 PyTorch 环境：
