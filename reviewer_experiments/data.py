@@ -10,6 +10,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
+from .bands import select_bands, validate_band_indices
 
 
 PT_BUNDLE_PREFIX = "ptbundle:"
@@ -86,18 +87,34 @@ def load_hsi(path: str | Path, layout: str = "auto") -> np.ndarray:
 class BandStats:
     mean: np.ndarray
     std: np.ndarray
+    band_indices: list[int] | None = None
+    source_bands: int | None = None
 
-    def as_dict(self) -> dict[str, list[float]]:
-        return {"mean": self.mean.tolist(), "std": self.std.tolist()}
+    def as_dict(self) -> dict:
+        return {"mean": self.mean.tolist(), "std": self.std.tolist(),
+                "band_indices": self.band_indices, "source_bands": self.source_bands}
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(np.asarray(value["mean"], np.float32), np.asarray(value["std"], np.float32),
+                   value.get("band_indices"), value.get("source_bands"))
 
 
-def compute_band_stats(frame, data_root: str | Path | None = None) -> BandStats:
+def compute_band_stats(frame, data_root: str | Path | None = None, band_indices=None) -> BandStats:
     total = None
     total_sq = None
     count = 0
+    source_bands = None
+    selected = None
     for row in frame.itertuples(index=False):
         layout = getattr(row, "hsi_layout", "auto")
         cube = load_hsi(resolve_path(row.hsi_path, data_root), layout)
+        if source_bands is None:
+            source_bands = cube.shape[0]
+            selected = validate_band_indices(band_indices, source_bands) if band_indices is not None else None
+        cube = select_bands(cube, selected, source_bands)
+        if not np.isfinite(cube).all():
+            raise ValueError(f"Non-finite selected HSI values: {row.hsi_path}")
         flat = cube.reshape(cube.shape[0], -1).astype(np.float64)
         if total is None:
             total = np.zeros(cube.shape[0], dtype=np.float64)
@@ -111,7 +128,7 @@ def compute_band_stats(frame, data_root: str | Path | None = None) -> BandStats:
         raise ValueError("cannot compute statistics from an empty training set")
     mean = total / count
     variance = np.maximum(total_sq / count - np.square(mean), 1e-12)
-    return BandStats(mean.astype(np.float32), np.sqrt(variance).astype(np.float32))
+    return BandStats(mean.astype(np.float32), np.sqrt(variance).astype(np.float32), selected, source_bands)
 
 
 class PairedDataset(Dataset):
@@ -143,6 +160,7 @@ class PairedDataset(Dataset):
             resolve_path(row.hsi_path, self.data_root),
             row.get("hsi_layout", "auto"),
         )
+        cube = select_bands(cube, self.band_stats.band_indices, self.band_stats.source_bands)
         if cube.shape[0] != len(self.band_stats.mean):
             raise ValueError(f"unexpected band count in {row.hsi_path}")
         cube = (cube - self.band_stats.mean[:, None, None]) / self.band_stats.std[:, None, None]

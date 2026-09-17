@@ -87,6 +87,13 @@ class HaarToken(nn.Module):
         return self.project(flattened).unsqueeze(1)
 
 
+class RawSpectrumToken(HaarToken):
+    """Same projection and parameter count as HaarToken; omit only Haar transform."""
+
+    def forward(self, hsi: torch.Tensor) -> torch.Tensor:
+        return self.project(hsi.mean(dim=(-2, -1))).unsqueeze(1)
+
+
 class CrossLayerTransformer(nn.Module):
     def __init__(self, dim: int, depth: int, heads: int, dropout: float, use_caf: bool):
         super().__init__()
@@ -96,6 +103,7 @@ class CrossLayerTransformer(nn.Module):
             ) for _ in range(depth)
         ])
         self.use_caf = use_caf
+        self.caf_source = "history"
         self.fusion = nn.ModuleList([nn.Linear(dim * 2, dim) for _ in range(max(depth - 2, 0))])
         self.norm = nn.LayerNorm(dim)
 
@@ -103,7 +111,8 @@ class CrossLayerTransformer(nn.Module):
         history = []
         for index, layer in enumerate(self.layers):
             if self.use_caf and index >= 2:
-                tokens = self.fusion[index - 2](torch.cat([tokens, history[index - 2]], dim=-1))
+                previous = history[index - 2] if self.caf_source == "history" else tokens
+                tokens = self.fusion[index - 2](torch.cat([tokens, previous], dim=-1))
             history.append(tokens)
             tokens = layer(tokens)
         return self.norm(tokens)
@@ -121,26 +130,34 @@ class HSITransformerEncoder(nn.Module):
         use_caf: bool = True,
         use_3d_patch: bool = True,
         max_tokens: int = 1024,
+        mean_depth_patch: bool = False,
     ):
         super().__init__()
         self.use_3d_patch = use_3d_patch
         self.token_mode = token_mode
+        self.mean_depth_patch = mean_depth_patch
+        if mean_depth_patch and not use_3d_patch:
+            raise ValueError("mean_depth_patch requires the reduced 3-D patch path")
         if use_3d_patch:
             self.spectral_reduce = nn.Sequential(
                 nn.Conv2d(bands, 64, 3, padding=1), nn.BatchNorm2d(64), nn.GELU()
             )
-            self.patch = nn.Conv3d(1, dim, kernel_size=(8, 16, 16), stride=(8, 16, 16))
+            self.patch = (nn.Conv3d(1, dim, kernel_size=(1, 16, 16), stride=(1, 16, 16))
+                          if mean_depth_patch else
+                          nn.Conv3d(1, dim, kernel_size=(8, 16, 16), stride=(8, 16, 16)))
         else:
             self.spectral_reduce = None
             self.patch = nn.Conv2d(bands, dim, kernel_size=16, stride=16)
         if token_mode == "wavelet":
             self.global_token = HaarToken(bands, dim)
+        elif token_mode == "raw_spectrum":
+            self.global_token = RawSpectrumToken(bands, dim)
         elif token_mode == "learnable":
             self.global_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
         elif token_mode == "mean":
             self.global_token = None
         else:
-            raise ValueError("token_mode must be wavelet, learnable, or mean")
+            raise ValueError("token_mode must be wavelet, raw_spectrum, learnable, or mean")
         self.position = nn.Parameter(torch.randn(1, max_tokens + 1, dim) * 0.02)
         self.dropout = nn.Dropout(dropout)
         self.transformer = CrossLayerTransformer(dim, depth, heads, dropout, use_caf)
@@ -148,6 +165,8 @@ class HSITransformerEncoder(nn.Module):
     def patch_tokens(self, hsi: torch.Tensor) -> torch.Tensor:
         if self.use_3d_patch:
             reduced = self.spectral_reduce(hsi).unsqueeze(1)
+            if self.mean_depth_patch:
+                reduced = F.avg_pool3d(reduced, kernel_size=(8, 1, 1), stride=(8, 1, 1))
             embedded = self.patch(reduced)
             return embedded.flatten(2).transpose(1, 2)
         embedded = self.patch(hsi)
@@ -157,7 +176,7 @@ class HSITransformerEncoder(nn.Module):
         patches = self.patch_tokens(hsi)
         if patches.shape[1] + 1 > self.position.shape[1]:
             raise ValueError("too many patch tokens; increase max_tokens")
-        if self.token_mode == "wavelet":
+        if self.token_mode in {"wavelet", "raw_spectrum"}:
             global_token = self.global_token(hsi)
         elif self.token_mode == "learnable":
             global_token = self.global_token.expand(hsi.shape[0], -1, -1)
@@ -204,12 +223,18 @@ class PSNet(nn.Module):
         use_3d_patch: bool = True,
         rgb_backbone: str = "resnet34",
         rgb_pretrained: bool = False,
+        caf_source: str = "history",
+        mean_depth_patch: bool = False,
     ):
         super().__init__()
         self.rgb_encoder = RGBEncoder(dim, rgb_backbone, rgb_pretrained)
         self.hsi_encoder = HSITransformerEncoder(
-            bands, dim, depth, heads, dropout, token_mode, use_caf, use_3d_patch
+            bands, dim, depth, heads, dropout, token_mode, use_caf, use_3d_patch,
+            mean_depth_patch=mean_depth_patch,
         )
+        if caf_source not in {"history", "self"}:
+            raise ValueError("caf_source must be history or self")
+        self.hsi_encoder.transformer.caf_source = caf_source
         self.head = nn.Sequential(nn.Linear(dim * 2, dim * 2), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 2, 2))
 
     def forward(self, rgb: torch.Tensor, hsi: torch.Tensor) -> torch.Tensor:
@@ -224,9 +249,15 @@ MODEL_NAMES = (
     "psnet_learnable_cls",
     "plain_multimodal",
     "rgb_resnet18",
+    "rgb_resnet34",
+    "hsi_transformer",
     "spectral_1d_cnn",
     "compact_3d_cnn",
     "simple_multimodal",
+    "psnet_raw_spectrum_token",
+    "psnet_caf_self",
+    "psnet_raw_token_caf_self",
+    "psnet_mean_depth_patch",
 )
 
 
@@ -241,6 +272,14 @@ def build_model(
 ) -> nn.Module:
     if name == "rgb_resnet18":
         return Classifier(RGBEncoder(dim, "resnet18", rgb_pretrained), "rgb", dim)
+    if name == "rgb_resnet34":
+        return Classifier(RGBEncoder(dim, "resnet34", rgb_pretrained), "rgb", dim)
+    if name == "hsi_transformer":
+        return Classifier(
+            HSITransformerEncoder(bands, dim, depth, heads, dropout, "wavelet", True, True),
+            "hsi",
+            dim,
+        )
     if name == "spectral_1d_cnn":
         return Classifier(Spectral1DEncoder(dim), "hsi", dim)
     if name == "compact_3d_cnn":
@@ -256,6 +295,10 @@ def build_model(
         "psnet_no_3d_patch": ("wavelet", True, False),
         "psnet_learnable_cls": ("learnable", True, True),
         "plain_multimodal": ("learnable", False, True),
+        "psnet_raw_spectrum_token": ("raw_spectrum", True, True),
+        "psnet_caf_self": ("wavelet", True, True),
+        "psnet_raw_token_caf_self": ("raw_spectrum", True, True),
+        "psnet_mean_depth_patch": ("wavelet", True, True),
     }
     if name not in settings:
         raise ValueError(f"unknown model {name!r}; choose from {MODEL_NAMES}")
@@ -270,5 +313,6 @@ def build_model(
         use_caf=use_caf,
         use_3d_patch=use_3d_patch,
         rgb_pretrained=rgb_pretrained,
+        caf_source="self" if name in {"psnet_caf_self", "psnet_raw_token_caf_self"} else "history",
+        mean_depth_patch=name == "psnet_mean_depth_patch",
     )
-

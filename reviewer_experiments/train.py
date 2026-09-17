@@ -14,6 +14,7 @@ from sklearn.model_selection import train_test_split
 from .data import BandStats, PairedDataset, compute_band_stats, load_hsi, resolve_path
 from .metrics import classification_metrics, plant_predictions
 from .models import build_model, trainable_parameters
+from .band_selection import rank_training_bands, top_band_indices
 
 
 def set_seed(seed: int) -> None:
@@ -56,7 +57,11 @@ def train_fold(
     weight_decay: float = 1e-4, device: str = "auto", dim: int = 128,
     depth: int = 4, heads: int = 4, dropout: float = 0.1, rgb_pretrained: bool = False,
     inner_val_fraction: float = 0.2,
+    band_indices: list[int] | None = None,
+    top_k_bands: int | None = None,
 ) -> Path:
+    if band_indices is not None and top_k_bands is not None:
+        raise ValueError("Use either fixed band_indices or fit-only top_k_bands")
     set_seed(seed)
     task_csv = Path(task_csv)
     task = task_csv.stem
@@ -75,9 +80,13 @@ def train_fold(
     memberships = [set(part.plant_id) for part in (training, validation, testing)]
     if any(memberships[i] & memberships[j] for i in range(3) for j in range(i + 1, 3)):
         raise RuntimeError("plant leakage across fit, early-stop, and outer-test sets")
-    stats = compute_band_stats(training, data_root)
-    first = training.iloc[0]
-    bands = load_hsi(resolve_path(first.hsi_path, data_root), first.get("hsi_layout", "auto")).shape[0]
+    ranking = None
+    if top_k_bands is not None:
+        ranking = rank_training_bands(training, data_root)
+        band_indices = top_band_indices(ranking, top_k_bands)
+        ranking["selected"] = ranking.band.isin(band_indices)
+    stats = compute_band_stats(training, data_root, band_indices)
+    bands = len(stats.mean)
     train_loader = DataLoader(PairedDataset(training, stats, data_root, True), batch_size=batch_size, shuffle=True, num_workers=workers)
     val_loader = DataLoader(PairedDataset(validation, stats, data_root, False), batch_size=batch_size, shuffle=False, num_workers=workers)
     test_loader = DataLoader(PairedDataset(testing, stats, data_root, False), batch_size=batch_size, shuffle=False, num_workers=workers)
@@ -96,7 +105,16 @@ def train_fold(
         "dim": dim, "depth": depth, "heads": heads, "dropout": dropout,
         "rgb_pretrained": rgb_pretrained, "parameters": trainable_parameters(model),
         "inner_val_fraction": inner_val_fraction,
+        "band_indices": stats.band_indices, "source_bands": stats.source_bands,
+        "top_k_bands": top_k_bands,
+        "band_selection_rule": "fit_plants_absolute_group_mean_difference" if ranking is not None else "fixed_original_indices",
+        "epochs": epochs, "patience": patience, "batch_size": batch_size,
+        "learning_rate": learning_rate, "weight_decay": weight_decay,
     }
+    for split_name, part in [("fit", training), ("validation", validation), ("test", testing)]:
+        part.to_csv(output / f"{split_name}_observations.csv", index=False)
+    if ranking is not None:
+        ranking.to_csv(output / "band_ranking.csv", index=False)
     for epoch in range(1, epochs + 1):
         model.train()
         losses = []
@@ -125,13 +143,30 @@ def train_fold(
     return output / "predictions.csv"
 
 
-def run_matrix(task_dir: str | Path, output: str | Path, tasks: list[str], models: list[str], seeds: list[int], folds: list[int], **kwargs) -> list[Path]:
+def run_matrix(
+    task_dir: str | Path,
+    output: str | Path,
+    tasks: list[str],
+    models: list[str],
+    seeds: list[int],
+    folds: list[int],
+    force: bool = False,
+    **kwargs,
+) -> list[Path]:
     predictions = []
     for task in tasks:
         for model in models:
             for seed in seeds:
                 for fold in folds:
-                    predictions.append(train_fold(Path(task_dir) / f"{task}.csv", model, seed, fold, output, **kwargs))
+                    expected = Path(output) / model / task / f"seed_{seed}" / f"fold_{fold}" / "predictions.csv"
+                    if expected.is_file() and not force:
+                        saved_config = json.loads(expected.with_name("run.json").read_text())
+                        if saved_config.get("top_k_bands") != kwargs.get("top_k_bands") or (kwargs.get("top_k_bands") is None and saved_config.get("band_indices") != kwargs.get("band_indices")):
+                            raise ValueError(f"Cannot resume different band selection: {expected}; use a new output")
+                        print(f"resume: keeping {expected}")
+                        predictions.append(expected)
+                    else:
+                        predictions.append(train_fold(Path(task_dir) / f"{task}.csv", model, seed, fold, output, **kwargs))
     manifest = Path(output) / "prediction_manifest.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text("\n".join(map(str, predictions)) + "\n", encoding="utf-8")
