@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 PRESETS = {
+    'paper-minimal': ('all_dpi,dpi_2', 'psnet_full', [157]),
     'main': ('dpi_2,dpi_4,dpi_6,presymptomatic_2_4',
              'psnet_full,plain_multimodal,simple_multimodal,rgb_resnet18,rgb_resnet34,hsi_transformer,spectral_1d_cnn,compact_3d_cnn', [157,257,357]),
     'priority': ('dpi_2,dpi_4,presymptomatic_2_4', 'psnet_full,rgb_resnet18,plain_multimodal', [157]),

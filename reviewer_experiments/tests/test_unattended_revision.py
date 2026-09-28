@@ -4,10 +4,29 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from run_unattended_revision import choose_cohort, main
+from run_unattended_revision import choose_cohort, main, paper_minimal
 
 
 class UnattendedTest(unittest.TestCase):
+    def test_minimal_runs_only_psnet_with_spectra_between_tasks(self):
+        with patch('run_unattended_revision.execute') as run:
+            stages = []
+            paper_minimal(Path('tasks'), Path('selected.csv'), Path('out'), 'cuda:0',
+                          lambda name, **kwargs: stages.append(name), {'cohort':'recovered'})
+        self.assertEqual(stages, ['training_all_dpi','summary_all_dpi','spectral_analysis',
+                                  'training_dpi_2','summary_dpi_2'])
+        calls = run.call_args_list
+        self.assertEqual(len(calls), 5)
+        for index, task in ((0, 'all_dpi'), (3, 'dpi_2')):
+            args = calls[index].args
+            self.assertEqual(args[args.index('--models')+1], 'psnet_full')
+            self.assertEqual(args[args.index('--tasks')+1], task)
+            self.assertEqual(args[args.index('--seed')+1], '157')
+            self.assertNotIn('--top-k-bands', args)
+        self.assertEqual(calls[2].args[0], 'reviewer_experiments.spectral_reanalysis')
+        self.assertEqual(calls[2].args[2], Path('selected.csv'))
+        self.assertTrue(calls[2].kwargs['module'])
+
     def test_mismatch_falls_back_explicitly(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

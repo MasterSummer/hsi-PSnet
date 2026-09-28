@@ -1,7 +1,12 @@
-# 主实验与植物级数据组成表
+# PSNet 五折、光谱分析与 2 dpi 单独分类
 
-`main` 只运行 8 个主对比模型，不包含结构消融：PSNet、plain multimodal、simple multimodal、RGB ResNet-18、RGB ResNet-34、HSI Transformer、1D spectral CNN、compact 3D CNN。
-四个任务为 2 dpi、4 dpi、6 dpi、联合 2+4 dpi；三个种子为 157、257、357；每个任务做植物独立五折，共 480 次训练。
+当前精简流程使用后台入口的 `paper-minimal`，按以下顺序运行：
+
+1. 仅 PSNet，全部日期合并为一个接种/mock 二分类任务，种子 157，植物独立五折。
+2. 按论文方法重做植物级 whole-cube 光谱统计，分 2、4、6 dpi 比较当天两组，输出 Welch 检验、Hedges' g 和 BH-FDR。使用与分类相同的数据清单，不训练波段筛选模型。
+3. 仅 PSNet，只用 2 dpi 的接种与 mock 数据，种子 157，单独植物独立五折。
+
+总计 10 次训练。组成表继续输出。单种子结果不能替代论文三种子均值及 SD。此流程通过 `run_unattended_revision.py --preset paper-minimal` 执行；单独的 `run_revision.py` 仅生成分类训练命令，不包含光谱步骤。
 
 在服务器原有 Git 仓库目录、已激活的 GPU 训练环境中执行。当前目录应包含 `split_4re`，其中已有两个 PT 和两个补发 ZIP；旧 PT 中的 RGB 路径应仍有效。
 
@@ -19,7 +24,7 @@
   trap 'rm -f "$PSNET_LAUNCH_FILE"' EXIT
   git show "$PSNET_COMMIT:launch_revision.sh" > "$PSNET_LAUNCH_FILE"
   PSNET_REVISION_REF="$PSNET_COMMIT" bash "$PSNET_LAUNCH_FILE" \
-    --preset main \
+    --preset paper-minimal \
     --split-dir "$PSNET_SPLIT" \
     --zip "$PSNET_SPLIT/wetransfer_hypercubes-mat-files_2026-09-21_1153.zip" \
     --rgb-zip "$PSNET_SPLIT/新数据.zip" \
@@ -44,4 +49,4 @@ tail -n 80 "$PSNET_JOB/job.log"
 cat "$PSNET_JOB/results/STATUS.json"
 ```
 
-完成后 `EXIT_CODE.txt` 应为 0，状态应为 `completed`。主实验汇总在 `results/summary/summary.csv`，逐种子指标在 `results/summary/metrics_by_seed.csv`。若状态为 `failed`，读取 `results/FAILED.txt`；启动成功不代表训练完成。
+完成后 `EXIT_CODE.txt` 应为 0，状态应为 `completed`。全日期任务汇总在 `results/summary/all_dpi/summary.csv`，2 dpi 在 `results/summary/dpi_2/summary.csv`；对应种子目录下的 `evaluation/` 含植物级 OOF 评估。光谱输出在 `results/spectral/`，其中 `summary_by_dpi.csv` 是各日期汇总，`within_dpi_band_statistics.csv` 是逐波段统计，`plant_mean_spectra.csv` 是植物均值光谱。若状态为 `failed`，读取 `results/FAILED.txt`；启动成功不代表训练完成。

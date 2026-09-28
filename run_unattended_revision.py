@@ -31,10 +31,28 @@ def digest(path):
     return h.hexdigest()
 
 
-def execute(script, *args):
-    command = [sys.executable, '-u', str(ROOT / script), *map(str, args)]
+def execute(script, *args, module=False):
+    target = ['-m', script] if module else [str(ROOT / script)]
+    command = [sys.executable, '-u', *target, *map(str, args)]
     print('RUN:', command, flush=True)
     subprocess.run(command, check=True, cwd=ROOT)
+
+
+def paper_minimal(tasks, metadata, output, device, stage, decision):
+    """Five pooled folds, descriptive spectra, then five date-matched 2-dpi folds."""
+    for task in ('all_dpi', 'dpi_2'):
+        if task == 'dpi_2':
+            stage('spectral_analysis', **decision)
+            execute('reviewer_experiments.spectral_reanalysis', '--metadata', metadata,
+                    '--region', 'whole', '--output', output / 'spectral', module=True)
+        stage('training_' + task, **decision)
+        runs = output / 'experiments' / task
+        execute('run_controlled_ablations.py', '--task-dir', tasks,
+                '--output', runs / 'seed_157', '--models', 'psnet_full',
+                '--tasks', task, '--seed', '157', '--device', device)
+        stage('summary_' + task, **decision)
+        execute('summarize_revision.py', '--runs-root', runs,
+                '--output', output / 'summary' / task)
 
 
 def choose_cohort(metadata, recovered, rgb_root, output, policy, layout='HWC'):
@@ -151,12 +169,15 @@ def job(args, output, stage):
         files.add(args.rgb_zip)
     hashes = {str(p): digest(p) for p in sorted(files)}
     write_json(output / 'input_sha256.json', hashes)
-    stage('training', **decision)
-    execute('run_revision.py', '--preset', args.preset, '--task-dir', tasks,
-            '--output', output / 'experiments', '--device', args.device, '--execute')
-    stage('summary', **decision)
-    execute('summarize_revision.py', '--runs-root', output / 'experiments',
-            '--output', output / 'summary')
+    if args.preset == 'paper-minimal':
+        paper_minimal(tasks, selected_metadata, output, args.device, stage, decision)
+    else:
+        stage('training', **decision)
+        execute('run_revision.py', '--preset', args.preset, '--task-dir', tasks,
+                '--output', output / 'experiments', '--device', args.device, '--execute')
+        stage('summary', **decision)
+        execute('summarize_revision.py', '--runs-root', output / 'experiments',
+                '--output', output / 'summary')
     # Recheck once so accidental input edits during a long job do not pass unnoticed.
     stage('verify_inputs', **decision)
     if any(digest(Path(p)) != value for p, value in hashes.items()):
@@ -165,9 +186,13 @@ def job(args, output, stage):
                '补发数据未纳入，本次使用旧 PT 队列。原因：' + decision['reason'])
     task_names, model_names, seeds = PRESETS[args.preset]
     count = len(task_names.split(','))*len(model_names.split(','))*len(seeds)*5
+    metric_note = ('指标：summary/all_dpi/summary.csv、summary/dpi_2/summary.csv；各目录含逐种子指标。\n'
+                   '光谱：spectral/summary_by_dpi.csv、within_dpi_band_statistics.csv、plant_mean_spectra.csv。\n'
+                   if args.preset == 'paper-minimal' else
+                   '指标：summary/summary.csv；逐种子指标：summary/metrics_by_seed.csv。\n')
     (output / 'RESULTS.md').write_text('# 运行完成\n\n' + message + '\n\n'
         f'完成 {args.preset}：{len(model_names.split(","))} 个模型 × {len(task_names.split(","))} 个任务 × 5 折 × {len(seeds)} 个种子，共 {count} 次训练。\n\n'
-        '指标：summary/summary.csv；逐种子指标：summary/metrics_by_seed.csv。\n'
+        + metric_note +
         '组成表及英文图注：composition_used/；原队列对照：composition_archived/。\n'
         '单种子没有种子间 SD；多种子 SD 不等于独立生物重复。包含 6 dpi 的任务不能作为症状前诊断证据。\n'
         '核查文件：cohort_decision.json、input_sha256.json、preflight.json 及各折输出。\n')
@@ -179,7 +204,7 @@ def main():
     p.add_argument('--split-dir', type=Path, required=True)
     p.add_argument('--rgb-root', type=Path)
     p.add_argument('--rgb-zip', type=Path, help='Supplementary encoded RGB images; old RGB paths are retained')
-    p.add_argument('--preset', choices=['controls','main'], default='controls')
+    p.add_argument('--preset', choices=['controls','main','paper-minimal'], default='controls')
     source = p.add_mutually_exclusive_group()
     source.add_argument('--zip', type=Path)
     source.add_argument('--processed-dir', type=Path)
