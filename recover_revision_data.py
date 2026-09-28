@@ -73,6 +73,36 @@ def export_mat(archive, output):
     print(f'Exported {len(rows)} cubes to {output}; not merged into training data.')
 
 
+def export_rgb(archive, output):
+    """Decode actual image formats; never interpret RGB888 names as raw pixels."""
+    output = fresh_directory(output)
+    records, seen = [], set()
+    with zipfile.ZipFile(archive) as z:
+        for name in sorted(z.namelist()):
+            if name.startswith('__MACOSX/') or Path(name).suffix.lower() not in {'.rgb888','.jpg','.jpeg','.png'}:
+                continue
+            stem = Path(name).stem
+            record = identify(stem)
+            if record['sample_id'] in seen:
+                raise ValueError(f'Duplicate RGB observation: {stem}')
+            seen.add(record['sample_id'])
+            raw = z.read(name)
+            with Image.open(io.BytesIO(raw)) as im:
+                im.load()
+                if im.format not in {'JPEG','PNG'} or im.mode != 'RGB':
+                    raise ValueError(f'Unsupported encoded RGB image: {name}, {im.format}, {im.mode}')
+                suffix = '.jpg' if im.format == 'JPEG' else '.png'
+                records.append(dict(**record, file=stem+suffix, format=im.format,
+                    size=list(im.size), source_sha256=hashlib.sha256(raw).hexdigest()))
+            # Keep encoded bytes exactly; only use the extension verified by decoding.
+            (output / (stem+suffix)).write_bytes(raw)
+    if not records:
+        raise ValueError('No decodable named RGB files found')
+    (output/'rgb_export_audit.json').write_text(json.dumps(records,indent=2)+'\n')
+    print(f'Exported {len(records)} verified RGB images to {output}',flush=True)
+    return output
+
+
 def merge(base, recovered, rgb_root, output, layout='HWC'):
     output = fresh_directory(output)
     frame = read_metadata(base)

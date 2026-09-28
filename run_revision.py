@@ -6,6 +6,8 @@ import subprocess
 import sys
 
 PRESETS = {
+    'main': ('dpi_2,dpi_4,dpi_6,presymptomatic_2_4',
+             'psnet_full,plain_multimodal,simple_multimodal,rgb_resnet18,rgb_resnet34,hsi_transformer,spectral_1d_cnn,compact_3d_cnn', [157,257,357]),
     'priority': ('dpi_2,dpi_4,presymptomatic_2_4', 'psnet_full,rgb_resnet18,plain_multimodal', [157]),
     'recovered': ('dpi_2,presymptomatic_2_4,all_dpi', 'psnet_full,rgb_resnet18,plain_multimodal', [157,257,357]),
     'controls': ('all_dpi', 'psnet_full,psnet_raw_spectrum_token,psnet_caf_self,psnet_raw_token_caf_self,psnet_mean_depth_patch', [157]),

@@ -13,7 +13,7 @@ from summarize_revision import summarize
 
 class RevisionDeliveryTest(unittest.TestCase):
     def test_presets_have_supported_models_and_expected_budgets(self):
-        budgets={'priority':45,'recovered':135,'controls':25,'full':720}
+        budgets={'main':480,'priority':45,'recovered':135,'controls':25,'full':720}
         for name,(tasks,models,seeds) in PRESETS.items():
             self.assertLessEqual(set(models.split(',')),set(MODEL_NAMES))
             self.assertEqual(len(tasks.split(','))*len(models.split(','))*len(seeds)*5,budgets[name])

@@ -62,7 +62,7 @@ def choose_cohort(metadata, recovered, rgb_root, output, policy, layout='HWC'):
     return tasks, dict(cohort='archived', recovered_included=False, reason=reason)
 
 
-def preflight(metadata, device):
+def preflight(metadata, device, preset='controls'):
     import numpy as np
     import torch
     from PIL import Image
@@ -82,11 +82,13 @@ def preflight(metadata, device):
     del cube
     _load_pt_bundle.cache_clear()
     gc.collect()
-    # Fetch or check the only pretrained backbone used by the controls preset now,
-    # rather than discovering a missing cache/network connection after preprocessing.
-    from torchvision.models import resnet34, ResNet34_Weights
+    # Fetch/check weights before the long training phase.
+    from torchvision.models import resnet34, ResNet34_Weights, resnet18, ResNet18_Weights
     model = resnet34(weights=ResNet34_Weights.DEFAULT)
     del model
+    if preset == 'main':
+        model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        del model
     gc.collect()
     return dict(observations=len(frame), plants=int(frame.plant_id.nunique()),
                 gpu=torch.cuda.get_device_name(torch.device(device)))
@@ -95,17 +97,21 @@ def preflight(metadata, device):
 def job(args, output, stage):
     from reviewer_experiments.ingest import build_split4re_metadata
     from reviewer_experiments.data import _load_pt_bundle
-    from recover_revision_data import export_mat
+    from recover_revision_data import export_mat, export_rgb
+    from dataset_composition import write_composition
+    from run_revision import PRESETS
     stage('metadata')
     metadata = output / 'base_metadata.csv'
     info = build_split4re_metadata(args.split_dir, metadata, args.rgb_root)
+    # Produce the archived table even if later recovery/preflight prevents training.
+    write_composition(metadata, output / 'composition_archived', 'archived')
     if info['missing_rgb']:
         raise ValueError('Missing historical RGB files; supply the correct --rgb-root')
-    stage('preflight')
-    validation = preflight(metadata, args.device)
-    write_json(output / 'preflight.json', validation)
     stage('recovery_audit')
     recovered = args.processed_dir
+    recovered_rgb = args.rgb_root
+    if args.rgb_zip:
+        recovered_rgb = export_rgb(args.rgb_zip, output / 'recovered_rgb')
     export_error = None
     if args.zip:
         try:
@@ -116,12 +122,18 @@ def job(args, output, stage):
                 raise
             export_error = f'{type(error).__name__}: {error}'
             print('RECOVERY EXPORT FAILED:', export_error, flush=True)
-    tasks, decision = choose_cohort(metadata, recovered, args.rgb_root, output,
+    tasks, decision = choose_cohort(metadata, recovered, recovered_rgb, output,
                                    args.data_policy, 'HWC' if args.zip else args.layout)
     if export_error:
         decision['reason'] = 'Recovery export failed: ' + export_error
     write_json(output / 'cohort_decision.json', decision)
     print(json.dumps(decision, ensure_ascii=False), flush=True)
+    selected_metadata = (output / 'recovered_cohort/metadata.csv'
+                         if decision['recovered_included'] else metadata)
+    write_composition(selected_metadata, output / 'composition_used', decision['cohort'])
+    stage('preflight', **decision)
+    validation = preflight(selected_metadata, args.device, args.preset)
+    write_json(output / 'preflight.json', validation)
     # Avoid retaining both PT bundles in this parent during each trainer subprocess.
     _load_pt_bundle.cache_clear()
     gc.collect()
@@ -135,10 +147,12 @@ def job(args, output, stage):
             files.add(parse_pt_bundle_uri(value)[0] if value.startswith('ptbundle:') else Path(value))
     if args.zip:
         files.add(args.zip)
+    if args.rgb_zip:
+        files.add(args.rgb_zip)
     hashes = {str(p): digest(p) for p in sorted(files)}
     write_json(output / 'input_sha256.json', hashes)
     stage('training', **decision)
-    execute('run_revision.py', '--preset', 'controls', '--task-dir', tasks,
+    execute('run_revision.py', '--preset', args.preset, '--task-dir', tasks,
             '--output', output / 'experiments', '--device', args.device, '--execute')
     stage('summary', **decision)
     execute('summarize_revision.py', '--runs-root', output / 'experiments',
@@ -149,10 +163,13 @@ def job(args, output, stage):
         raise RuntimeError('Input content changed during this job; results must not be used')
     message = ('补发数据通过重叠检查并已纳入。' if decision['recovered_included'] else
                '补发数据未纳入，本次使用旧 PT 队列。原因：' + decision['reason'])
+    task_names, model_names, seeds = PRESETS[args.preset]
+    count = len(task_names.split(','))*len(model_names.split(','))*len(seeds)*5
     (output / 'RESULTS.md').write_text('# 运行完成\n\n' + message + '\n\n'
-        '完成 controls：5 个模型 × 5 折 × 1 个种子，共 25 次训练。\n\n'
+        f'完成 {args.preset}：{len(model_names.split(","))} 个模型 × {len(task_names.split(","))} 个任务 × 5 折 × {len(seeds)} 个种子，共 {count} 次训练。\n\n'
         '指标：summary/summary.csv；逐种子指标：summary/metrics_by_seed.csv。\n'
-        '单种子没有种子间 SD；该实验混合全部日期，不能作为症状前诊断证据。\n'
+        '组成表及英文图注：composition_used/；原队列对照：composition_archived/。\n'
+        '单种子没有种子间 SD；多种子 SD 不等于独立生物重复。包含 6 dpi 的任务不能作为症状前诊断证据。\n'
         '核查文件：cohort_decision.json、input_sha256.json、preflight.json 及各折输出。\n')
     return decision
 
@@ -161,6 +178,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--split-dir', type=Path, required=True)
     p.add_argument('--rgb-root', type=Path)
+    p.add_argument('--rgb-zip', type=Path, help='Supplementary encoded RGB images; old RGB paths are retained')
+    p.add_argument('--preset', choices=['controls','main'], default='controls')
     source = p.add_mutually_exclusive_group()
     source.add_argument('--zip', type=Path)
     source.add_argument('--processed-dir', type=Path)
@@ -169,7 +188,7 @@ def main():
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()
-    for key in ('split_dir','rgb_root','zip','processed_dir','output'):
+    for key in ('split_dir','rgb_root','zip','rgb_zip','processed_dir','output'):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).expanduser().resolve())
     # Refuse reusing a job directory; training-level resume remains separately available.
@@ -181,7 +200,7 @@ def main():
     try:
         if not args.device.startswith('cuda'):
             raise ValueError('This unattended preset requires a CUDA device')
-        for path in (args.zip, args.processed_dir):
+        for path in (args.zip, args.rgb_zip, args.processed_dir):
             if path is not None and not path.exists():
                 raise FileNotFoundError(path)
         decision = job(args, args.output, stage)
