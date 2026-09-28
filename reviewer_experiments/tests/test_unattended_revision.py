@@ -43,6 +43,16 @@ class UnattendedTest(unittest.TestCase):
                 choose_cohort(Path('base'),Path('new'),Path('rgb'),Path('out'),'require-recovered')
             prepare.assert_not_called()
 
+    def test_append_policy_is_explicit_and_never_falls_back_on_other_errors(self):
+        with patch('recover_revision_data.merge') as merge:
+            _,decision=choose_cohort(Path('base'),Path('new'),Path('rgb'),Path('out'),'append-missing')
+            self.assertFalse(merge.call_args.kwargs['require_overlap_match'])
+            self.assertEqual(decision['processing_consistency'],'not_established')
+        with patch('recover_revision_data.merge',side_effect=ValueError('Missing corresponding RGB')), patch('reviewer_experiments.core.prepare_tasks') as prepare:
+            with self.assertRaisesRegex(ValueError,'Missing corresponding RGB'):
+                choose_cohort(Path('base'),Path('new'),Path('rgb'),Path('out'),'append-missing')
+            prepare.assert_not_called()
+
     def test_passed_merge_uses_recovered_tasks(self):
         with patch('recover_revision_data.merge'),patch('reviewer_experiments.core.prepare_tasks') as prepare:
             tasks,decision=choose_cohort(Path('base'),Path('new'),Path('rgb'),Path('out'),'prefer-recovered')

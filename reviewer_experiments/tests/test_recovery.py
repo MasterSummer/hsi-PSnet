@@ -70,5 +70,35 @@ class RecoveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'no overlap'):
                 merge(r/'base.csv',new,rgb,r/'out')
 
+    def test_append_keeps_old_overlap_and_records_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=Path(tmp);new,rgb,cube=self.fixture(r)
+            original=(r/'old/Plant1_Infected_Leaf3_Day2.npy').read_bytes()
+            np.save(new/'Plant1_Infected_Leaf3_Day2.npy',cube+1)
+            with patch('recover_revision_data.prepare_tasks'):
+                merge(r/'base.csv',new,rgb,r/'out',require_overlap_match=False)
+            merged=pd.read_csv(r/'out/metadata.csv')
+            self.assertEqual(len(merged),7)
+            self.assertFalse(merged.sample_id.duplicated().any())
+            row=merged.set_index('sample_id').loc['run1_infected_p001_l3_d2']
+            self.assertIn('/old/',row.hsi_path)
+            self.assertEqual(row.processing_source,'archived')
+            self.assertEqual((merged.processing_source=='supplementary').sum(),1)
+            self.assertEqual((r/'old/Plant1_Infected_Leaf3_Day2.npy').read_bytes(),original)
+            audit=json.loads((r/'out/overlap_audit.json').read_text())
+            self.assertFalse(audit['passed'])
+            self.assertFalse(audit['overlap_match_required'])
+            summary=json.loads((r/'out/merge_summary.json').read_text())
+            self.assertEqual(summary['added_sample_ids'],['run1_infected_p002_l3_d2'])
+            self.assertEqual(summary['skipped_overlap_ids'],['run1_infected_p001_l3_d2'])
+
+    def test_append_still_rejects_incompatible_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=Path(tmp);new,rgb,cube=self.fixture(r)
+            np.save(new/'Plant2_Infected_Leaf3_Day2.npy',cube[:2])
+            with self.assertRaisesRegex(ValueError,'shapes differ'):
+                merge(r/'base.csv',new,rgb,r/'out',require_overlap_match=False)
+            self.assertFalse((r/'out/metadata.csv').exists())
+
 
 if __name__=='__main__':unittest.main()

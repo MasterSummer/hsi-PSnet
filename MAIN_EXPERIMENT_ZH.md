@@ -28,7 +28,7 @@
     --split-dir "$PSNET_SPLIT" \
     --zip "$PSNET_SPLIT/wetransfer_hypercubes-mat-files_2026-09-21_1153.zip" \
     --rgb-zip "$PSNET_SPLIT/新数据.zip" \
-    --data-policy require-recovered \
+    --data-policy append-missing \
     --device cuda:0
 )
 ```
@@ -37,9 +37,11 @@
 
 若旧 RGB 路径已失效，在启动参数中追加 `--rgb-root '/服务器上原RGB目录'`。补发的 8 张 RGB 不能替代整套旧 RGB。
 
-程序先输出原队列的 `results/composition_archived/`，再导出 ZIP、校验重叠样本，通过后生成本次实际队列的 `results/composition_used/`，随后预检 GPU 并训练。组成表、缺失观测清单、英文图注均按对应清单计算；若补齐七条观测，实际队列图注不会继续声称缺失七条。
+程序先输出原队列的 `results/composition_archived/`，再导出 ZIP、记录重叠差异，保留旧观测并只加入缺失条目，生成本次实际队列的 `results/composition_used/`，随后预检 GPU 并训练。组成表、缺失观测清单、英文图注均按对应清单计算；若补齐七条观测，实际队列图注不会继续声称缺失七条。
 
-已有归档核查提示原始 MAT 与旧数据预处理可能不同。`require-recovered` 在完整张量不匹配时停止，不回退到旧队列训练。原始导出不等于完成旧预处理；若失败，检查 `results/recovered_cohort/overlap_audit.json` 和 `results/FAILED.txt`，找回原预处理后用 `--processed-dir /实际处理后NPY目录 --layout HWC` 替代 `--zip`。
+按用户确认，补发文件属于同次实验、相同采集条件。当前命令显式选择 `append-missing`：旧 569 条不覆盖，8 个补发条目中保留已有重叠条目的旧版本，只增加缺失的七条。预计总观测 576 条、2 dpi 192 条/96 株；以运行生成的组成表为准。没有重新猜测归一化或背景掩膜，MAT 只做格式与排列转换。
+
+重叠张量已知数值不一致；这不代表采集条件不同。`overlap_audit.json` 的 `passed` 只表示数值是否匹配，不代表整个追加任务成功或失败；在本模式下该字段可以为 false。`merge_summary.json` 记录实际新增及跳过 ID，清单的 `processing_source` 记录旧/补发来源，图注和结果保留处理一致性尚未确认的说明。缺配对 RGB、无效尺寸或非有限数据仍会报错，不会自动退回旧队列。原 `require-recovered` 严格模式继续保留。
 
 查看启动器打印的作业目录：
 

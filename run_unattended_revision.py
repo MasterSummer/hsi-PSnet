@@ -62,17 +62,26 @@ def choose_cohort(metadata, recovered, rgb_root, output, policy, layout='HWC'):
         try:
             if rgb_root is None:
                 raise ValueError('Adding recovered observations requires --rgb-root')
-            merge(metadata, recovered, rgb_root, output / 'recovered_cohort', layout)
+            if policy == 'append-missing':
+                merge(metadata, recovered, rgb_root, output / 'recovered_cohort', layout,
+                      require_overlap_match=False)
+            else:
+                merge(metadata, recovered, rgb_root, output / 'recovered_cohort', layout)
         except (ValueError, OSError, KeyError) as error:
-            if policy == 'require-recovered':
+            if policy in ('require-recovered', 'append-missing'):
                 raise
             reason = f'{type(error).__name__}: {error}'
             print('RECOVERY NOT USED; continuing with archived cohort:', reason, flush=True)
         else:
+            if policy == 'append-missing':
+                return output / 'recovered_cohort/tasks', dict(cohort='recovered', recovered_included=True,
+                    data_policy=policy, processing_consistency='not_established',
+                    reason='Missing observations appended; archived overlaps retained. Numerical overlap '
+                           'agreement was not required. Processing differences remain in this combined cohort.')
             return output / 'recovered_cohort/tasks', dict(cohort='recovered', recovered_included=True,
                 reason='Full-cube overlap check and merge passed. Inspect retained processing provenance.')
     else:
-        if policy == 'require-recovered':
+        if policy in ('require-recovered', 'append-missing'):
             raise ValueError('Recovery source is required')
         reason = 'Archived cohort selected' if policy == 'archived' else 'No recovery source supplied'
     tasks = output / 'archived_tasks'
@@ -136,7 +145,7 @@ def job(args, output, stage):
             export_mat(args.zip, output / 'recovered_raw')
             recovered = output / 'recovered_raw'
         except (ValueError, OSError, KeyError) as error:
-            if args.data_policy == 'require-recovered':
+            if args.data_policy in ('require-recovered', 'append-missing'):
                 raise
             export_error = f'{type(error).__name__}: {error}'
             print('RECOVERY EXPORT FAILED:', export_error, flush=True)
@@ -149,6 +158,14 @@ def job(args, output, stage):
     selected_metadata = (output / 'recovered_cohort/metadata.csv'
                          if decision['recovered_included'] else metadata)
     write_composition(selected_metadata, output / 'composition_used', decision['cohort'])
+    if args.data_policy == 'append-missing':
+        note = ('This cohort combines archived tensors with supplementary observations. '
+                'Preprocessing consistency has not been established; numerical overlap agreement '
+                'was not required for adding missing observations.')
+        for name in ('caption_en.txt', 'dataset_composition.md'):
+            with (output / 'composition_used' / name).open('a') as stream:
+                stream.write('\n' + note + '\n')
+        (output / 'PROCESSING_NOTE.txt').write_text(note + '\n')
     stage('preflight', **decision)
     validation = preflight(selected_metadata, args.device, args.preset)
     write_json(output / 'preflight.json', validation)
@@ -184,6 +201,10 @@ def job(args, output, stage):
         raise RuntimeError('Input content changed during this job; results must not be used')
     message = ('补发数据通过重叠检查并已纳入。' if decision['recovered_included'] else
                '补发数据未纳入，本次使用旧 PT 队列。原因：' + decision['reason'])
+    if args.data_policy == 'append-missing':
+        message = ('已保留旧数据并加入补发的缺失观测，重叠条目未重复添加。'
+                   '原观测与补发观测的来源保存在 processing_source 列；重叠张量的数值差异保留在审计中。'
+                   '本次未要求重叠张量数值一致。分类与光谱结果均来自补齐后的队列。')
     task_names, model_names, seeds = PRESETS[args.preset]
     count = len(task_names.split(','))*len(model_names.split(','))*len(seeds)*5
     metric_note = ('指标：summary/all_dpi/summary.csv、summary/dpi_2/summary.csv；各目录含逐种子指标。\n'
@@ -209,7 +230,7 @@ def main():
     source.add_argument('--zip', type=Path)
     source.add_argument('--processed-dir', type=Path)
     p.add_argument('--layout', choices=['HWC', 'CHW'], default='HWC')
-    p.add_argument('--data-policy', choices=['archived', 'prefer-recovered', 'require-recovered'], default='prefer-recovered')
+    p.add_argument('--data-policy', choices=['archived', 'prefer-recovered', 'require-recovered', 'append-missing'], default='prefer-recovered')
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()

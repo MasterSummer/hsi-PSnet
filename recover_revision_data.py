@@ -1,6 +1,8 @@
-"""Export recovered MAT cubes, or merge preprocessed cubes after overlap validation.
+"""Export recovered MAT cubes and merge missing observations with provenance.
 
-No normalization is guessed. All outputs must be new directories. See RERUN_ZH.md.
+Strict overlap validation is the default; the runner can explicitly append missing
+observations while retaining archived overlaps. No normalization is guessed.
+All outputs must be new directories. See MAIN_EXPERIMENT_ZH.md.
 """
 from __future__ import annotations
 
@@ -103,7 +105,7 @@ def export_rgb(archive, output):
     return output
 
 
-def merge(base, recovered, rgb_root, output, layout='HWC'):
+def merge(base, recovered, rgb_root, output, layout='HWC', require_overlap_match=True):
     output = fresh_directory(output)
     frame = read_metadata(base)
     # Resolve paths before writing metadata into a different directory.
@@ -148,9 +150,12 @@ def merge(base, recovered, rgb_root, output, layout='HWC'):
     passed = bool(checks) and all(c['matched'] for c in checks)
     (output / 'overlap_audit.json').write_text(json.dumps(dict(overlaps=checks,
         candidate_additions=len(additions), passed=passed,
+        policy='require-recovered' if require_overlap_match else 'append-missing',
+        overlap_match_required=require_overlap_match,
         tolerance=dict(rtol=1e-5, atol=1e-6),
-        limitation='Overlap agreement is necessary, not proof of preprocessing consistency for every new sample.'), indent=2)+'\n')
-    if not passed:
+        limitation='Overlap agreement does not prove preprocessing consistency. append-missing retains '
+                   'archived overlaps and adds new observations even when processing differs.'), indent=2)+'\n')
+    if require_overlap_match and not passed:
         raise ValueError('Overlap check failed or no overlap supplied. No merged metadata written. Recover the original preprocessing; do not rescale a cube merely to pass this check.')
     if not additions:
         raise ValueError('No new observations to merge')
@@ -158,11 +163,19 @@ def merge(base, recovered, rgb_root, output, layout='HWC'):
     for row in frame.itertuples():
         if load_hsi(row.hsi_path, getattr(row, 'hsi_layout', 'CHW')).shape != shape:
             raise ValueError('Historical and recovered cube shapes differ')
-    merged = pd.concat([frame, pd.DataFrame(additions)], ignore_index=True)
+    frame['processing_source'] = 'archived'
+    added = pd.DataFrame(additions)
+    added['processing_source'] = 'supplementary'
+    merged = pd.concat([frame, added], ignore_index=True)
     # A new cohort must get fresh outer folds, never inherit old fold assignments.
     merged = merged.drop(columns=['fold', 'task'], errors='ignore')
     merged.to_csv(output / 'metadata.csv', index=False)
     prepare_tasks(output / 'metadata.csv', output / 'tasks', n_splits=5, seed=157, require_files=True)
+    (output / 'merge_summary.json').write_text(json.dumps(dict(
+        policy='require-recovered' if require_overlap_match else 'append-missing',
+        archived_observations=len(frame), added_observations=len(additions), total_observations=len(merged),
+        added_sample_ids=added.sample_id.tolist(), skipped_overlap_ids=[c['sample_id'] for c in checks],
+        overlap_numerically_matched=passed, processing_consistency_established=False), indent=2)+'\n')
     print(f'Added {len(additions)} observations; retained {len(checks)} existing overlaps without duplication. Total {len(merged)}.')
 
 
