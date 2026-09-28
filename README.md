@@ -12,3 +12,5 @@ This repository contains the binary, date-matched PSNet reimplementation and pla
 The revision reports archived results and a completed separate band-selection experiment. The new controlled ablations have code but no completed real-data results in the manuscript. Recovered raw data are not silently mixed into the historical inputs. The manuscript is an author-review draft; author declarations require confirmation before submission.
 
 Raw images, cubes, checkpoints and private correspondence are not part of this revision package.
+
+The original checkpoint guide is retained in [CHECKPOINTS_LEGACY.md](CHECKPOINTS_LEGACY.md). Use the revision commands above for the current manuscript experiments.
