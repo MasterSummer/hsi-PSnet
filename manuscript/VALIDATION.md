@@ -15,3 +15,7 @@ Final DOCX SHA-256:
 ```
 
 Validation limits: no full historical PT bundles were available locally, so a real-data merge and new GPU training were not executed. Synthetic tests cover merge rejection, overlap deduplication, preset budgets, incomplete folds, differing protocols and single-seed uncertainty. The manuscript does not report newly completed controlled ablations or newly recovered-cohort results. This is an author-review draft, not evidence that all reviewer requests have been satisfied.
+
+## Unattended server launcher follow-up
+
+Five additional tests passed for explicit fallback to the archived cohort, strict recovery failure, successful cohort selection, failure status and success status. A separate launcher integration check used a temporary Git repository and a synthetic child process: verified code snapshot export, paths containing spaces, preservation of the original working directory and local changes, background execution and exit-code recording. Shell syntax and runner CLI checks passed. These checks did not perform GPU training or validate the server's private input files. The Word artifact above is unchanged.

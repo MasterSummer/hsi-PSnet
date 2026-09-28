@@ -4,6 +4,7 @@ __pycache__/
 /outputs/
 /runs/
 /data/
+/revision_jobs/
 *.pt
 *.pth
 *.mat
