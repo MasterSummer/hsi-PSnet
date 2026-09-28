@@ -49,7 +49,7 @@ class Attention(nn.Module):
             nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
         )
-    def forward(self, x, mask = None):
+    def forward(self, x, mask = None, return_attn: bool = False):
         # x:[b,n,dim]
         b, n, _, h = *x.shape, self.heads
 
@@ -77,6 +77,8 @@ class Attention(nn.Module):
         # cat all output -> [b, n, head_num*head_dim]
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
+        if return_attn:
+            return out, attn
         return out
 
 class SEBlockViT(nn.Module):
@@ -118,10 +120,15 @@ class Transformer(nn.Module):
          # 添加归一化层
         self.skipcat_norm = nn.LayerNorm(dim)
         
-    def forward(self, x, mask = None):
+    def forward(self, x, mask = None, return_attn: bool = False):
+        attn_maps = [] if return_attn else None
         if self.mode == 'ViT':
             for attn, ff in self.layers:
-                x = attn(x, mask = mask)
+                if return_attn:
+                    x, attn_map = attn(x, mask = mask, return_attn=True)
+                    attn_maps.append(attn_map)
+                else:
+                    x = attn(x, mask = mask)
                 x = ff(x)
         elif self.mode == 'CAF':
             last_output = [] 
@@ -132,12 +139,18 @@ class Transformer(nn.Module):
                     x = self.skipcat[nl - 2](torch.cat([x.unsqueeze(3), last_output[nl - 2].unsqueeze(3)], dim=3)).squeeze(3)
                     # x = self.skipcat_norm(x)
                     # print(f"Layer {i+1} - After Skip Connection: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
-                x = attn(x, mask=mask)
+                if return_attn:
+                    x, attn_map = attn(x, mask=mask, return_attn=True)
+                    attn_maps.append(attn_map)
+                else:
+                    x = attn(x, mask=mask)
                 # print(f"Layer {i+1} - After Attention: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
                 x = ff(x)
                 # print(f"Layer {i+1} - After FeedForward: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
                 nl += 1
 
+        if return_attn:
+            return x, attn_maps
         return x
 
 
@@ -301,7 +314,7 @@ class ViT(nn.Module):
             nn.LayerNorm(dim),
             nn.Linear(dim, num_classes)
         )
-    def forward(self, x, mask = None):
+    def forward(self, x, mask = None, return_tokens: bool = False, return_attn: bool = False):
 
         # patchs[batch, patch_num, patch_size*patch_size*c]  [batch,200,145*145]
         # x = rearrange(x, 'b c h w -> b c (h w)')
@@ -327,16 +340,29 @@ class ViT(nn.Module):
         
 #         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b) #[b,1,dim]
 #         x = torch.cat((cls_tokens, x), dim = 1) #[b,n+1,dim]
-        
+
         
 
         x += self.pos_embedding[:, :(n + 1)]
         x = self.dropout(x)
         # transformer: x[b,n + 1,dim] -> x[b,n + 1,dim]
-        x = self.transformer(x, mask)
+        if return_attn:
+            x, attn_maps = self.transformer(x, mask, return_attn=True)
+        else:
+            x = self.transformer(x, mask)
+            attn_maps = None
 
         # classification: using cls_token output
-        x = self.to_latent(x[:,0])
+        tokens = x
+        cls_token_out = self.to_latent(tokens[:,0])
 
         # MLP classification layer
-        return x
+        if return_tokens or return_attn:
+            extras = {
+                'tokens': tokens,
+                'attn_maps': attn_maps,
+                'cls_token': tokens[:, 0],
+            }
+            return cls_token_out, extras
+
+        return cls_token_out

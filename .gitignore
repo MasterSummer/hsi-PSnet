@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+/outputs/
+/runs/
+/data/
+/revision_jobs/
+*.pt
+*.pth
+*.mat
+*.hypercube
+.DS_Store

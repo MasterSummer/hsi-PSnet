@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import numpy as np
+from typing import Optional
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
 from sklearn.manifold import TSNE
@@ -402,7 +403,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import label_binarize # 新增
 
-def evaluate(model, test_loader, class_names=None, save_dir='results', device=None):
+def evaluate_legacy(model, test_loader, class_names=None, save_dir='results', device=None):
     """
     增强的测试集评估函数，计算多分类和二分类的全面指标。
     """
@@ -667,3 +668,258 @@ def evaluate(model, test_loader, class_names=None, save_dir='results', device=No
 #     print(f"总是被分错的样本数: {len(always_wrong)}")
     
 #     return test_metrics
+
+
+# === 新版评估：支持注意力提取、隐藏向量导出与波段重要性估计 ===
+def evaluate(
+    model,
+    test_loader,
+    class_names=None,
+    save_dir='results',
+    device=None,
+    collect_features: bool = False,
+    collect_attn: bool = False,
+    collect_band_importance: bool = False,
+    projection_method: str = None,
+    projection_components: int = 2,
+    max_batches: Optional[int] = None,
+):
+    """
+    增强版评估：
+    - 原有的多/二分类指标
+    - 可选提取 HSNet 注意力 (末层 CLS->Patch)
+    - 可选导出分类器前隐藏向量并做降维可视化
+    - 基于梯度的波段重要性估计
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(save_dir, f"eval_{timestamp}")
+    os.makedirs(save_path, exist_ok=True)
+
+    model = model.to(device)
+    model.eval()
+
+    all_preds, all_labels, all_probs = [], [], []
+    feature_batches, feature_labels = [], []
+    attn_cls_tokens = []
+    band_saliencies = []
+
+    for batch_idx, (rgb, hsi, labels) in enumerate(test_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+
+        need_extras = collect_features or collect_attn or collect_band_importance
+        rgb = rgb.to(device)
+        hsi = hsi.to(device)
+        labels = labels.to(device)
+
+        grad_enabled = collect_band_importance
+        if grad_enabled:
+            hsi = hsi.detach().clone().requires_grad_(True)
+
+        context = torch.enable_grad() if grad_enabled else torch.no_grad()
+        with context:
+            if need_extras:
+                outputs, extras = model(
+                    rgb,
+                    hsi,
+                    return_features=True,
+                    return_attn=collect_attn,
+                )
+            else:
+                outputs = model(rgb, hsi)
+                extras = {}
+
+            probs = torch.softmax(outputs, dim=1)
+            preds = torch.argmax(probs, dim=1)
+
+            if collect_band_importance:
+                top_idx = torch.argmax(outputs, dim=1)
+                selected = outputs.gather(1, top_idx.unsqueeze(1)).sum()
+                selected.backward()
+                band_saliencies.append(hsi.grad.detach().abs().mean(dim=(0, 2, 3)).cpu())
+                model.zero_grad(set_to_none=True)
+
+        all_preds.extend(preds.detach().cpu().numpy())
+        all_labels.extend(labels.detach().cpu().numpy())
+        all_probs.extend(probs.detach().cpu().numpy())
+
+        if collect_features and extras:
+            feature_batches.append(extras['pre_logits'].detach().cpu())
+            feature_labels.append(labels.detach().cpu())
+
+        if collect_attn and extras.get('hsi_attention') is not None:
+            last_attn = extras['hsi_attention'][-1].detach().cpu()  # [B, heads, N, N]
+            cls_attn = last_attn.mean(dim=1)[:, 0, 1:]  # [B, N-1]
+            attn_cls_tokens.append(cls_attn)
+
+    all_labels = np.array(all_labels)
+    all_preds = np.array(all_preds)
+    all_probs = np.array(all_probs)
+
+    if class_names is None:
+        unique_labels = np.unique(all_labels)
+        class_names = [str(i) for i in range(np.max(unique_labels) + 1)] if len(unique_labels) > 0 else []
+
+    binary_labels = (all_labels > 0).astype(int)
+    binary_preds = (all_preds > 0).astype(int)
+    binary_probs_diseased = all_probs[:, 1:].sum(axis=1)
+    binary_class_names = ['healthy', 'diseased']
+
+    test_metrics = {}
+    num_classes = len(class_names)
+    test_metrics['test_accuracy'] = accuracy_score(all_labels, all_preds)
+    test_metrics['test_precision_weighted'] = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+    test_metrics['test_recall_weighted'] = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+    test_metrics['test_f1_weighted'] = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+
+    if num_classes > 1 and all_probs.shape[1] == num_classes:
+        y_true_binarized = label_binarize(all_labels, classes=range(num_classes))
+        test_metrics['test_auroc_ovr_macro'] = roc_auc_score(y_true_binarized, all_probs, average='macro', multi_class='ovr')
+    else:
+        test_metrics['test_auroc_ovr_macro'] = float('nan')
+
+    multi_report_dict = classification_report(all_labels, all_preds, target_names=class_names, output_dict=True, zero_division=0)
+    for class_name in class_names:
+        key = f'test_acc_{class_name.replace(" ", "_").lower()}'
+        test_metrics[key] = multi_report_dict[class_name]['recall']
+
+    test_metrics['test_binary_accuracy'] = accuracy_score(binary_labels, binary_preds)
+    test_metrics['test_binary_precision'] = precision_score(binary_labels, binary_preds, zero_division=0)
+    test_metrics['test_binary_recall'] = recall_score(binary_labels, binary_preds, zero_division=0)
+    test_metrics['test_binary_f1'] = f1_score(binary_labels, binary_preds, zero_division=0)
+
+    if len(np.unique(binary_labels)) > 1:
+        test_metrics['test_binary_auroc'] = roc_auc_score(binary_labels, binary_probs_diseased)
+    else:
+        test_metrics['test_binary_auroc'] = float('nan')
+
+    pd.DataFrame(multi_report_dict).transpose().to_csv(os.path.join(save_path, 'multiclass_classification_report.csv'))
+    test_metrics['multiclass_classification_report'] = multi_report_dict
+
+    binary_report_dict = classification_report(binary_labels, binary_preds, target_names=binary_class_names, output_dict=True, zero_division=0)
+    pd.DataFrame(binary_report_dict).transpose().to_csv(os.path.join(save_path, 'binary_classification_report.csv'))
+    test_metrics['binary_classification_report'] = binary_report_dict
+
+    multi_cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(pd.DataFrame(multi_cm, index=class_names, columns=class_names), annot=True, fmt='d', cmap='Blues')
+    plt.title('Multiclass Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.savefig(os.path.join(save_path, 'multiclass_confusion_matrix.png'))
+    plt.close()
+
+    binary_cm = confusion_matrix(binary_labels, binary_preds)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(pd.DataFrame(binary_cm, index=binary_class_names, columns=binary_class_names), annot=True, fmt='d', cmap='Blues')
+    plt.title('Binary Classification Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.savefig(os.path.join(save_path, 'binary_confusion_matrix.png'))
+    plt.close()
+
+    results_df = pd.DataFrame({
+        'true_label': all_labels,
+        'predicted_label': all_preds,
+        'true_binary_label': binary_labels,
+        'predicted_binary_label': binary_preds,
+        'prob_diseased': binary_probs_diseased,
+        **{f'prob_class_{i}': all_probs[:, i] for i in range(num_classes)}
+    })
+    results_df.to_csv(os.path.join(save_path, 'test_predictions.csv'), index=False)
+
+    if band_saliencies:
+        band_importance = torch.stack(band_saliencies).mean(dim=0).numpy()
+        np.save(os.path.join(save_path, 'band_importance.npy'), band_importance)
+        plt.figure(figsize=(10, 4))
+        plt.plot(band_importance)
+        plt.xlabel('Spectral Band')
+        plt.ylabel('Importance (|grad| mean)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, 'band_importance.png'))
+        plt.close()
+        test_metrics['band_importance_path'] = os.path.join(save_path, 'band_importance.npy')
+
+    if attn_cls_tokens:
+        attn_matrix = torch.cat(attn_cls_tokens, dim=0).numpy()
+        np.save(os.path.join(save_path, 'cls_attention.npy'), attn_matrix)
+        plt.figure(figsize=(8, 4))
+        plt.imshow(attn_matrix, aspect='auto', cmap='viridis')
+        plt.colorbar(label='Attention weight (avg heads)')
+        plt.xlabel('Token index')
+        plt.ylabel('Sample')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, 'cls_attention.png'))
+        plt.close()
+        test_metrics['cls_attention_path'] = os.path.join(save_path, 'cls_attention.npy')
+
+    if collect_features and feature_batches:
+        features_np = torch.cat(feature_batches, dim=0).numpy()
+        feature_labels_np = torch.cat(feature_labels, dim=0).numpy()
+        proj_result = None
+        if projection_method:
+            n_components = min(projection_components, features_np.shape[1], 3)
+            if projection_method.lower() == 'pca':
+                projector = PCA(n_components=n_components)
+                proj_result = projector.fit_transform(features_np)
+            elif projection_method.lower() == 'tsne':
+                proj_components = min(3, n_components)
+                proj_result = TSNE(n_components=proj_components, perplexity=min(30, len(features_np) - 1)).fit_transform(features_np)
+
+            if proj_result is not None:
+                plt.figure(figsize=(8, 6))
+                if proj_result.shape[1] >= 2:
+                    scatter = plt.scatter(proj_result[:, 0], proj_result[:, 1], c=feature_labels_np, cmap='tab20', s=8, alpha=0.7)
+                    plt.xlabel('Component 1')
+                    plt.ylabel('Component 2')
+                else:
+                    scatter = plt.scatter(proj_result[:, 0], np.zeros_like(proj_result[:, 0]), c=feature_labels_np, cmap='tab20', s=8, alpha=0.7)
+                    plt.xlabel('Component 1')
+                    plt.ylabel('Component 2')
+                plt.title(f'Pre-classifier features ({projection_method})')
+                plt.colorbar(scatter, label='Label')
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_path, f'pre_logits_{projection_method.lower()}.png'), dpi=300)
+                plt.close()
+
+        np.savez(
+            os.path.join(save_path, 'pre_logits_features.npz'),
+            features=features_np,
+            labels=feature_labels_np,
+            projection=proj_result,
+            projection_method=projection_method
+        )
+
+    def convert_numpy(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    with open(os.path.join(save_path, 'test_metrics.json'), 'w') as f:
+        json.dump(test_metrics, f, indent=4, default=convert_numpy)
+
+    print(f"\n--- Evaluation Results (saved to {save_path}) ---")
+    print("\n[Multiclass Metrics]")
+    print(f"  Accuracy: {test_metrics['test_accuracy']:.4f}")
+    print(f"  AUROC (Macro OvR): {test_metrics.get('test_auroc_ovr_macro', float('nan')):.4f}")
+    print(f"  F1 (Weighted): {test_metrics['test_f1_weighted']:.4f}")
+    print("  Per-class Accuracy (Recall):")
+    for name in class_names:
+        key = f'test_acc_{name.replace(" ", "_").lower()}'
+        print(f"    - {name}: {test_metrics[key]:.4f}")
+
+    print("\n[Binary Metrics (Healthy vs Diseased)]")
+    print(f"  Accuracy: {test_metrics['test_binary_accuracy']:.4f}")
+    print(f"  AUROC: {test_metrics.get('test_binary_auroc', float('nan')):.4f}")
+    print(f"  Precision: {test_metrics['test_binary_precision']:.4f}")
+    print(f"  Recall: {test_metrics['test_binary_recall']:.4f}")
+    print(f"  F1-score: {test_metrics['test_binary_f1']:.4f}")
+
+    return test_metrics, all_labels, all_preds

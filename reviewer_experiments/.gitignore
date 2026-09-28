@@ -1,0 +1,4 @@
+outputs/
+tasks/
+*.pt
+__pycache__/
